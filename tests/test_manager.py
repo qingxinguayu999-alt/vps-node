@@ -5,6 +5,11 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
+import json
+import base64
+import threading
+from urllib.request import urlopen, Request
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
@@ -94,5 +99,72 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(prompts[0],'2')
         self.assertEqual(custom['cert_mode'],'custom'); self.assertEqual(custom['cert'],old['cert'])
         self.assertNotIn('cert_pin',custom)
+
+    def fixtures(self,g):
+        cert,key,pin=g['selfsigned_certificate']('8.8.8.8')
+        return [dict(id='id-'+p,name='same-name',protocol=p,host='ws.example.com' if p in ('vless','vmess') else '8.8.8.8',port=20000+i,uuid='00000000-0000-4000-8000-000000000000',password='SECRET_PASSWORD',path='/ws-'+p,argo=p in ('vless','vmess'),ip_version='4',cert=cert,key=key,cert_mode='custom' if p in ('vless','vmess') else 'selfsigned',cert_pin=pin) for i,p in enumerate(g['PROTOCOLS'])]
+
+    def test_four_protocol_client_exports(self):
+        with tempfile.TemporaryDirectory() as d:
+            g=manager();g['ROOT']=pathlib.Path(d); nodes=self.fixtures(g)
+            self.assertEqual(set(g['PROTOCOLS']),{'vless','vmess','tuic','hysteria2'})
+            lines=base64.b64decode(g['subscription_body'](nodes,'base64')).decode().splitlines()
+            self.assertEqual(len(lines),4)
+            tuic_q=parse_qs(urlsplit(lines[2]).query)
+            self.assertEqual(tuic_q['allow_insecure'],['1'])
+            clash=json.loads(g['subscription_body'](nodes,'clash'))
+            self.assertEqual(len(clash['proxies']),4)
+            self.assertEqual(len({p['name'] for p in clash['proxies']}),4)
+            self.assertEqual(clash['proxies'][0]['port'],443)
+            self.assertEqual(clash['proxies'][2]['uuid'],nodes[2]['uuid'])
+            self.assertEqual(clash['proxies'][2]['fingerprint'],nodes[2]['cert_pin'])
+            sb=json.loads(g['subscription_body'](nodes,'singbox'))
+            proxy=next(o for o in sb['outbounds'] if o['type']=='tuic')
+            self.assertIn('certificate',proxy['tls']); self.assertNotIn('insecure',proxy['tls'])
+            self.assertNotIn('PRIVATE KEY',json.dumps(sb))
+            legacy=dict(nodes[0],protocol='trojan')
+            self.assertEqual(len(json.loads(g['subscription_body'](nodes+[legacy],'clash'))['proxies']),4)
+
+    def test_subscription_http_auth_formats_rotation_and_live_nodes(self):
+        with tempfile.TemporaryDirectory() as d:
+            g=manager();root=pathlib.Path(d);g['ROOT']=root;nodes=self.fixtures(g)
+            token='x'*24
+            (root/'subscription.json').write_text(json.dumps(dict(token=token,host='sub.example.com',port=0)))
+            (root/'nodes.json').write_text(json.dumps(nodes))
+            server=g['ThreadingHTTPServer'](('127.0.0.1',0),g['SubscriptionHandler'])
+            thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+            base='http://127.0.0.1:'+str(server.server_port)
+            try:
+                with self.assertRaises(HTTPError) as err:urlopen(base+'/s/wrong')
+                self.assertEqual(err.exception.code,404)
+                with urlopen(Request(base+'/s/'+token,headers={'User-Agent':'clash.meta'})) as response:
+                    self.assertEqual(len(json.load(response)['proxies']),4)
+                    self.assertIn('no-store',response.headers['Cache-Control'])
+                with urlopen(base+'/s/'+token+'?format=base64') as response:
+                    self.assertEqual(len(base64.b64decode(response.read()).decode().splitlines()),4)
+                with self.assertRaises(HTTPError) as err:urlopen(base+'/s/'+token+'?format=invalid')
+                self.assertEqual(err.exception.code,400)
+                (root/'nodes.json').write_text(json.dumps(nodes[:2]))
+                with urlopen(base+'/s/'+token+'?format=clash') as response:self.assertEqual(len(json.load(response)['proxies']),2)
+                (root/'subscription.json').write_text(json.dumps(dict(token='y'*24,host='sub.example.com',port=0)))
+                with self.assertRaises(HTTPError) as err:urlopen(base+'/s/'+token)
+                self.assertEqual(err.exception.code,404)
+                with urlopen(base+'/s/'+'y'*24) as response:self.assertEqual(response.status,200)
+            finally:server.shutdown();server.server_close();thread.join()
+
+    def test_four_in_one_applies_all_four_once(self):
+        g=manager(); captured=[]
+        def ask(text,default=''):
+            if '监听地址' in text:return '4'
+            if '都走 Argo' in text:return 'y'
+            if '公开域名' in text:return ('vless' if 'VLESS' in text else 'vmess')+'.example.com'
+            if '现在配置' in text:return 'n'
+            return default
+        g['ask']=ask;g['load']=lambda:[];g['port_free']=lambda *a:None
+        g['quic_settings']=lambda *a,**k:dict(host='8.8.8.8',cert='/cert',key='/key',cert_mode='selfsigned',cert_pin='a'*64)
+        g['apply']=lambda nodes:captured.append(nodes)
+        with patch('shutil.which',return_value='/usr/bin/sing-box'):g['four_in_one']()
+        self.assertEqual(len(captured),1);self.assertEqual([n['protocol'] for n in captured[0]],g['PROTOCOLS'])
+        self.assertEqual(len({n['port'] for n in captured[0]}),4)
 
 if __name__ == '__main__': unittest.main()
