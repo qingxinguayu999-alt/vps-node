@@ -10,13 +10,14 @@ exec python3 - "$@" <<'PY'
 import base64, copy, fcntl, getpass, ipaddress, json, os, pathlib, re
 import secrets, shutil, socket, subprocess, sys, tempfile, time, uuid, hashlib
 from urllib.request import urlopen
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit, parse_qs
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = pathlib.Path('/etc/vps-node')
-VERSION = '1.3.0'
+VERSION = '2.0.0'
 DEFAULT_UPDATE_SOURCE = 'https://raw.githubusercontent.com/qingxinguayu999-alt/vps-node/main/update.json'
 SERVICE = 'vps-node'
-PROTOCOLS = ['vless', 'vmess', 'tuic', 'hysteria2', 'trojan', 'shadowsocks']
+PROTOCOLS = ['vless', 'vmess', 'tuic', 'hysteria2']
 
 def run(*args, capture=False, check=True):
     return subprocess.run(args, check=check, text=True,
@@ -90,6 +91,8 @@ def links(nodes):
             link = 'vmess://' + base64.b64encode(json.dumps(v, ensure_ascii=False).encode()).decode()
         elif p == 'tuic':
             q.update(congestion_control='bbr', udp_relay_mode='native', alpn='h3')
+            if n.get('cert_mode') == 'selfsigned':
+                q.update(allow_insecure='1',allowInsecure='1',insecure='1')
             link = f'tuic://{n["uuid"]}:{quote(n["password"],safe="")}@{authority}:{port}?{urlencode(q)}#{label}'
         elif p in ('hysteria2', 'trojan'):
             if p == 'hysteria2':
@@ -131,8 +134,12 @@ def apply(nodes):
     export(nodes)
 
 def export(nodes):
-    rows = links(nodes)
+    rows = links(client_nodes(nodes))
     write(ROOT/'links.txt', '\n'.join(x[1] for x in rows) + '\n')
+    supported = [n for n in nodes if n['protocol'] in PROTOCOLS]
+    write(ROOT/'subscription.txt', subscription_body(supported,'base64').decode())
+    write(ROOT/'clash.yaml', subscription_body(supported,'clash').decode())
+    write(ROOT/'sing-box-client.json', subscription_body(supported,'singbox').decode())
     qr = ROOT/'qr'; qr.mkdir(exist_ok=True, mode=0o700)
     for f in qr.glob('*.png'): f.unlink()
     if shutil.which('qrencode'):
@@ -181,6 +188,8 @@ WantedBy=multi-user.target
             print(f'{shortcut} 已被其他程序占用；请使用 sudo vps-node {shortcut}')
         else: write(path, wrapper, 0o755)
     if not (ROOT/'update-source.txt').exists(): write(ROOT/'update-source.txt',DEFAULT_UPDATE_SOURCE+'\n')
+    if run('systemctl','is-active','--quiet','vps-node-sub',capture=True,check=False).returncode==0:
+        run('systemctl','restart','vps-node-sub')
     print('安装完成。后续运行 sudo vps-node；添加首个节点后启动服务。')
 
 def certificate(h):
@@ -237,7 +246,7 @@ def selfsigned_certificate(address):
     cert, key = directory/'fullchain.pem', directory/'privkey.pem'
     try:
         run('openssl','req','-x509','-newkey','rsa:2048','-sha256','-nodes','-days','3650',
-            '-keyout',str(key),'-out',str(cert),'-subj','/CN=vps-node-hy2',
+            '-keyout',str(key),'-out',str(cert),'-subj','/CN=vps-node',
             '-addext','subjectAltName=IP:'+str(ip),capture=True)
         os.chmod(cert,0o600); os.chmod(key,0o600)
         return str(cert),str(key),cert_fingerprint(cert)
@@ -245,10 +254,10 @@ def selfsigned_certificate(address):
         shutil.rmtree(directory)
         raise
 
-def hy2_settings(ip_version, previous=None):
+def quic_settings(ip_version, previous=None, label='HY2'):
     old = previous or {}
     default = '1' if not previous or old.get('cert_mode') == 'selfsigned' else '2'
-    mode = ask('HY2 模式：1 无域名 + 自动自签证书 / 2 自定义域名及证书',default)
+    mode = ask(label+' 模式：1 无域名 + 自动自签证书 / 2 自定义域名及证书',default)
     if mode == '1':
         default_ip = old.get('host','') if old.get('cert_mode') == 'selfsigned' else ''
         try:
@@ -264,11 +273,11 @@ def hy2_settings(ip_version, previous=None):
             reusable = run('openssl','x509','-in',old['cert'],'-noout','-checkend','86400',capture=True,check=False).returncode == 0
         if reusable: cert,key,pin = old['cert'],old['key'],cert_fingerprint(old['cert'])
         else: cert,key,pin = selfsigned_certificate(address)
-        print('自签模式：分享链接使用 insecure=1 并附 pinSHA256 固定证书指纹；请确认客户端支持并保留指纹。')
+        print('自签模式：HY2 URI 附证书指纹；TUIC URI 使用跳过验证参数。可导出 sing-box 配置内置可信证书。')
         return dict(host=address,cert_mode='selfsigned',cert=cert,key=key,cert_pin=pin)
     if mode == '2':
         default_host = old.get('host','') if old.get('cert_mode') != 'selfsigned' else ''
-        h = host(ask('HY2 节点域名',default_host))
+        h = host(ask(label+' 节点域名',default_host))
         try: ipaddress.ip_address(h)
         except ValueError: pass
         else: raise ValueError('自定义域名模式请填写域名；公网 IP 请选自签模式')
@@ -277,6 +286,9 @@ def hy2_settings(ip_version, previous=None):
         else: cert,key = certificate(h)
         return dict(host=h,cert_mode='custom',cert=cert,key=key)
     raise ValueError('请输入 1 或 2')
+
+def hy2_settings(ip_version, previous=None):
+    return quic_settings(ip_version,previous,'HY2')
 
 def choose(nodes):
     if not nodes: raise ValueError('暂无节点')
@@ -312,7 +324,7 @@ def add():
     p = PROTOCOLS[i]
     argo = p in ('vless', 'vmess') and ask('通过 Argo 固定隧道？y/n', 'y' if p == 'vmess' else 'n').lower() == 'y'
     ip_version = ip_choice()
-    hy2 = hy2_settings(ip_version) if p == 'hysteria2' else {}
+    hy2 = quic_settings(ip_version,label='HY2' if p == 'hysteria2' else 'TUIC') if p in ('hysteria2','tuic') else {}
     h = hy2['host'] if hy2 else host(ask('节点域名（SS 可填 IP；Argo 填隧道公开域名）'))
     port = int(ask('本机监听端口', str(18080 + len(nodes)) if argo else str(20000 + len(nodes))))
     if not 1 <= port <= 65535: raise ValueError('端口必须是 1–65535')
@@ -321,7 +333,7 @@ def add():
     if p == 'shadowsocks': port_free(port, True, False, ip_version)
     n = dict(id=uuid.uuid4().hex, name=ask('节点名称', p), protocol=p, host=h, port=port, uuid=str(uuid.uuid4()), password=secrets.token_urlsafe(24), path='/'+secrets.token_hex(12), argo=argo, ip_version=ip_version)
     n.update(hy2)
-    if p not in ('shadowsocks','hysteria2') and not argo: n['cert'], n['key'] = certificate(h)
+    if p not in ('shadowsocks','hysteria2','tuic') and not argo: n['cert'], n['key'] = certificate(h)
     apply(nodes + [n])
     print('节点已添加。请在云安全组/本机防火墙放行：', f'{port}/'+('UDP' if p in ('tuic','hysteria2') else 'TCP+UDP' if p == 'shadowsocks' else 'TCP'))
     if argo: print(f'Cloudflare 隧道 Public hostname 设置 {h} → HTTP 服务 {origin(n)}；再用菜单安装隧道。路径：{n["path"]}')
@@ -331,13 +343,13 @@ def edit():
     nodes = load(); i = choose(nodes); n = copy.deepcopy(nodes[i])
     n['name'] = ask('节点名称', n['name'])
     n['ip_version'] = ip_choice(n.get('ip_version','4'))
-    if n['protocol'] == 'hysteria2':
-        n.update(hy2_settings(n['ip_version'],nodes[i]))
+    if n['protocol'] in ('hysteria2','tuic'):
+        n.update(quic_settings(n['ip_version'],nodes[i],'HY2' if n['protocol']=='hysteria2' else 'TUIC'))
         if n.get('cert_mode') != 'selfsigned': n.pop('cert_pin',None)
     else: n['host'] = host(ask('节点域名/IP', n['host']))
     if n['protocol'] in ('vless','vmess'):
         n['argo'] = ask('通过 Argo 固定隧道？y/n','y' if n['argo'] else 'n').lower() == 'y'
-    if n['protocol'] not in ('shadowsocks','hysteria2') and not n['argo']: n['cert'], n['key'] = certificate(n['host'])
+    if n['protocol'] not in ('shadowsocks','hysteria2','tuic') and not n['argo']: n['cert'], n['key'] = certificate(n['host'])
     port = int(ask('监听端口', str(n['port'])))
     if not 1 <= port <= 65535 or any(j != i and x['port'] == port for j,x in enumerate(nodes)): raise ValueError('端口无效或重复')
     # 同端口换监听地址时旧服务仍占用端口，交由重启检查与回滚处理。
@@ -405,12 +417,210 @@ WantedBy=multi-user.target
     run('systemctl','is-active','--quiet','vps-node-argo')
     print('隧道进程已启动。请用日志确认与 Cloudflare 建立连接；本脚本不代替控制台创建隧道/DNS 路由。')
 
+def client_nodes(nodes):
+    return [n for n in nodes if n['protocol'] in PROTOCOLS]
+
+def unique_name(n):
+    return n['name']+'-'+n['id'][:6]
+
+def clash_config(nodes):
+    proxies=[]
+    for n in client_nodes(nodes):
+        p=n['protocol']; insecure=n.get('cert_mode')=='selfsigned'
+        x=dict(name=unique_name(n),type=p,server=n['host'],port=443 if n['argo'] else n['port'],udp=True)
+        if p in ('vless','vmess'):
+            x.update(uuid=n['uuid'],tls=True,network='ws',servername=n['host'])
+            x['ws-opts']={'path':n['path'],'headers':{'Host':n['host']}}
+            if p=='vmess': x.update(alterId=0,cipher='auto')
+        else:
+            x.update(password=n['password'],sni=n['host'],alpn=['h3'])
+            x['skip-cert-verify']=insecure
+            if insecure and n.get('cert_pin'): x['fingerprint']=n['cert_pin']
+            if p=='tuic':
+                x.update(uuid=n['uuid'])
+                x['congestion-controller']='bbr'; x['udp-relay-mode']='native'
+        proxies.append(x)
+    names=[p['name'] for p in proxies]
+    return {'mixed-port':7890,'allow-lan':False,'mode':'rule','log-level':'info','proxies':proxies,
+            'proxy-groups':[{'name':'PROXY','type':'select','proxies':names+['DIRECT']}], 'rules':['MATCH,PROXY']}
+
+def singbox_client(nodes):
+    out=[]
+    for n in client_nodes(nodes):
+        p=n['protocol']; x=dict(type=p,tag=unique_name(n),server=n['host'],server_port=443 if n['argo'] else n['port'])
+        tls=dict(enabled=True,server_name=n['host'])
+        if n.get('cert_mode')=='selfsigned': tls['certificate']=pathlib.Path(n['cert']).read_text().splitlines()
+        if p in ('vless','vmess'):
+            x['uuid']=n['uuid']; x['transport']={'type':'ws','path':n['path'],'headers':{'Host':n['host']}}
+            if p=='vmess': x.update(security='auto',alter_id=0)
+        else:
+            x['password']=n['password']; tls['alpn']=['h3']
+            if p=='tuic': x.update(uuid=n['uuid'],congestion_control='bbr',udp_relay_mode='native',zero_rtt_handshake=False)
+        x['tls']=tls; out.append(x)
+    names=[x['tag'] for x in out]
+    return {'log':{'level':'info'},'inbounds':[{'type':'mixed','tag':'local','listen':'127.0.0.1','listen_port':2080}],
+            'outbounds':[{'type':'selector','tag':'PROXY','outbounds':names+['DIRECT']},*out,{'type':'direct','tag':'DIRECT'}], 'route':{'final':'PROXY'}}
+
+def subscription_body(nodes,fmt):
+    nodes=client_nodes(nodes)
+    if fmt=='clash': return json.dumps(clash_config(nodes),ensure_ascii=False,indent=2).encode()
+    if fmt=='singbox': return json.dumps(singbox_client(nodes),ensure_ascii=False,indent=2).encode()
+    text='\n'.join(link for _,link in links(nodes))+'\n'
+    if fmt=='plain': return text.encode()
+    if fmt=='base64': return base64.b64encode(text.encode())
+    raise ValueError('不支持的订阅格式')
+
+def resolve_format(query,user_agent):
+    explicit=parse_qs(query).get('format',['auto'])[0].lower()
+    if explicit in ('clash','singbox','plain','base64'): return explicit
+    if explicit!='auto': raise ValueError('不支持的订阅格式')
+    return 'clash' if any(v in user_agent.lower() for v in ('clash','mihomo','stash')) else 'base64'
+
+class SubscriptionHandler(BaseHTTPRequestHandler):
+    def log_message(self,*args): pass  # 不记录含 Token 的访问路径
+    def setup(self):
+        super().setup(); self.connection.settimeout(10)
+    def do_GET(self): self.respond(False)
+    def do_HEAD(self): self.respond(True)
+    def respond(self,head):
+        sent=False
+        try:
+            if len(self.path)>2048: self.send_error(414); return
+            settings=json.loads((ROOT/'subscription.json').read_text())
+            parsed=urlsplit(self.path)
+            if not secrets.compare_digest(parsed.path,'/s/'+settings['token']): self.send_error(404); return
+            try: fmt=resolve_format(parsed.query,self.headers.get('User-Agent',''))
+            except ValueError: self.send_error(400); return
+            body=subscription_body(load(),fmt)
+            self.send_response(200)
+            self.send_header('Content-Type','application/yaml; charset=utf-8' if fmt=='clash' else 'application/json; charset=utf-8' if fmt=='singbox' else 'text/plain; charset=utf-8')
+            self.send_header('Content-Length',str(len(body)))
+            self.send_header('Cache-Control','private, no-store, max-age=0')
+            self.send_header('profile-update-interval','6')
+            self.end_headers()
+            sent=True
+            if not head: self.wfile.write(body)
+        except (OSError,ValueError,KeyError):
+            if not sent:
+                try: self.send_error(503)
+                except OSError: pass
+
+def serve_subscription():
+    settings=json.loads((ROOT/'subscription.json').read_text())
+    server=ThreadingHTTPServer(('127.0.0.1',settings['port']),SubscriptionHandler)
+    server.daemon_threads=True
+    try: server.serve_forever()
+    finally: server.server_close()
+
+def subscription_url(settings,fmt='auto'):
+    url='https://'+settings['host']+'/s/'+settings['token']
+    return url if fmt=='auto' else url+'?format='+fmt
+
+def show_subscription(fmt='auto'):
+    settings=json.loads((ROOT/'subscription.json').read_text())
+    link=subscription_url(settings,fmt)
+    print('\n四协议订阅链接：'+link)
+    if shutil.which('qrencode'):
+        run('qrencode','-t','ANSIUTF8',link)
+        run('qrencode','-o',str(ROOT/'subscription-qr.png'),'-s','6',link)
+        os.chmod(ROOT/'subscription-qr.png',0o600)
+    print('自动格式：Clash Meta/Mihomo → Clash 配置；其他客户端 → 通用 Base64。需 Cloudflare 路由已配置且隧道在线。')
+    print('强制格式可用菜单 18；此链接包含订阅访问凭据，请勿公开。')
+
+def subscription_setup():
+    if not pathlib.Path('/usr/local/bin/vps-node').exists(): raise ValueError('请先选择安装核心以注册脚本命令')
+    path=ROOT/'subscription.json'
+    old=json.loads(path.read_text()) if path.exists() else {}
+    h=host(ask('Cloudflare HTTPS 订阅域名（独立于节点域名）',old.get('host','')))
+    if any(n['host']==h for n in client_nodes(load())): raise ValueError('请使用独立订阅域名，避免与节点路由冲突')
+    try: ipaddress.ip_address(h)
+    except ValueError: pass
+    else: raise ValueError('订阅地址请使用自己的 Cloudflare Tunnel 域名')
+    port=int(ask('订阅本机 HTTP 监听端口',str(old.get('port',18999))))
+    if not 1024<=port<=65535 or any(n['port']==port for n in load()): raise ValueError('端口无效或与节点重复')
+    if not old or port!=old['port']: port_free(port,False,True)
+    settings=dict(host=h,port=port,token=old.get('token') or secrets.token_urlsafe(18))
+    old_text=path.read_text() if path.exists() else None
+    write(path,json.dumps(settings))
+    write('/etc/systemd/system/vps-node-sub.service','''[Unit]
+Description=VPS Node Private Subscription
+After=network-online.target
+[Service]
+ExecStart=/usr/local/bin/vps-node --serve-subscription
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+[Install]
+WantedBy=multi-user.target
+''',0o644)
+    run('systemctl','daemon-reload')
+    try:
+        run('systemctl','enable','vps-node-sub'); run('systemctl','restart','vps-node-sub')
+        time.sleep(1); run('systemctl','is-active','--quiet','vps-node-sub')
+    except Exception:
+        if old_text:
+            write(path,old_text); run('systemctl','restart','vps-node-sub',check=False)
+        else:
+            run('systemctl','disable','--now','vps-node-sub',check=False); path.unlink(missing_ok=True)
+        raise RuntimeError('订阅服务启动失败，已恢复原设置')
+    print(f'Cloudflare Tunnel 添加 Public hostname：{h} → HTTP http://127.0.0.1:{port}。不需要公网开放本机端口。')
+    print('请关闭该主机名的缓存和交互式挑战，不启用需要浏览器登录的 Access 验证；保留随机订阅 Token。')
+    show_subscription()
+
+def subscription_format_menu():
+    if not (ROOT/'subscription.json').exists(): raise ValueError('先用菜单 16 配置订阅域名')
+    choices={'1':'auto','2':'base64','3':'clash','4':'singbox','5':'plain'}
+    choice=ask('格式：1 自动 / 2 v2rayN·小火箭·NekoBox / 3 Clash Meta / 4 sing-box JSON / 5 原始链接','1')
+    if choice not in choices: raise ValueError('无效格式')
+    show_subscription(choices[choice])
+
+def rotate_subscription():
+    path=ROOT/'subscription.json'
+    if not path.exists(): raise ValueError('尚未配置订阅')
+    if ask('换订阅 Token 会使旧链接失效，输入 ROTATE 确认')!='ROTATE': return
+    settings=json.loads(path.read_text()); settings['token']=secrets.token_urlsafe(18)
+    write(path,json.dumps(settings)); show_subscription()
+
+def four_in_one():
+    if not shutil.which('sing-box'): raise ValueError('请先安装核心')
+    nodes=load(); ip_version=ip_choice()
+    argo=ask('VLESS/VMess 都走 Argo？y/n','y').lower()=='y'
+    ws={}
+    if argo:
+        for p in ('vless','vmess'): ws[p]=dict(host=host(ask(p.upper()+' 的 Argo 公开域名')))
+    else:
+        h=host(ask('VLESS/VMess 直连证书域名')); cert,key=certificate(h)
+        ws={p:dict(host=h,cert=cert,key=key) for p in ('vless','vmess')}
+    quic=quic_settings(ip_version,label='TUIC/HY2')
+    base=int(ask('起始监听端口（将使用连续 4 个）',str(20000+len(nodes)*4)))
+    if not 1024<=base<=65532: raise ValueError('起始端口应为 1024–65532')
+    label=ask('四合一节点名称前缀','VPS')
+    added=[]
+    for offset,p in enumerate(PROTOCOLS):
+        port=base+offset
+        if any(n['port']==port for n in nodes): raise ValueError('端口与已有节点冲突')
+        use_argo=argo and p in ('vless','vmess')
+        port_free(port,p in ('tuic','hysteria2'),use_argo,ip_version)
+        n=dict(id=uuid.uuid4().hex,name=label+'-'+p.upper(),protocol=p,port=port,uuid=str(uuid.uuid4()),password=secrets.token_urlsafe(24),path='/'+secrets.token_hex(12),argo=use_argo,ip_version=ip_version)
+        n.update(ws[p] if p in ws else quic)
+        added.append(n)
+    apply(nodes+added)
+    print('四合一配置已一次性创建：VLESS/VMess TCP，TUIC/HY2 UDP。直连请放行相应端口。')
+    for n in added:
+        if n['argo']: print(f'{n["protocol"]}：{n["host"]} → {origin(n)}；WS 路径 {n["path"]}')
+    if argo: print('请分别配置两条 Cloudflare Public hostname；若同一域名，需按 WS 路径分流到对应端口，再用菜单 7 配置 Tunnel Token。')
+    if ask('现在配置一个四合一 HTTPS 订阅短链接？y/n','y').lower()=='y': subscription_setup()
+
 def show():
     nodes = load(); export(nodes)
-    for tag, link in links(nodes):
+    if (ROOT/'subscription.json').exists(): show_subscription(); return
+    for tag, link in links(client_nodes(nodes)):
         print('\n'+link)
         if shutil.which('qrencode'): run('qrencode','-t','ANSIUTF8',link)
-    print('导出位置：/etc/vps-node/links.txt 与 /etc/vps-node/qr/*.png；包含节点凭据，请妥善保管。')
+    print('尚未配置短链接，菜单 16 可配置 HTTPS 订阅；本地导出：subscription.txt / clash.yaml / sing-box-client.json / links.txt / qr。')
 
 def remove():
     nodes = load(); i = choose(nodes)
@@ -462,6 +672,8 @@ def install_script(data, expected_hash=None, expected_version=None):
     if ask(f'更新脚本 {VERSION} → {new_version}？输入 UPDATE')!='UPDATE': return
     if target.exists(): write(ROOT/'vps-node.previous.sh',target.read_text(),0o700)
     write(target,text,0o755)
+    if run('systemctl','is-active','--quiet','vps-node-sub',capture=True,check=False).returncode==0:
+        run('systemctl','restart','vps-node-sub')
     print('脚本已更新；请退出后重新运行 sudo vps-node。原上传文件不会被替换。')
 
 def check_updates():
@@ -494,9 +706,9 @@ def local_update():
     install_script(path.read_bytes())
 
 def uninstall():
-    print('sc 将停止并删除本工具的节点/隧道服务、快捷命令与 /etc/vps-node 配置及凭据。保留系统 BBR、软件包、ACME 证书和 Cloudflare 控制台隧道。')
+    print('sc 将停止并删除本工具的节点/隧道/订阅服务、快捷命令与 /etc/vps-node 配置及凭据。保留系统 BBR、软件包、ACME 证书和 Cloudflare 控制台隧道。')
     if ask('输入 UNINSTALL 确认')!='UNINSTALL': return False
-    for svc in ('vps-node','vps-node-argo'):
+    for svc in ('vps-node','vps-node-argo','vps-node-sub'):
         run('systemctl','disable','--now',svc,check=False)
         pathlib.Path('/etc/systemd/system/'+svc+'.service').unlink(missing_ok=True)
     pathlib.Path('/etc/letsencrypt/renewal-hooks/deploy/vps-node-restart').unlink(missing_ok=True)
@@ -521,13 +733,13 @@ def menu():
     nodes=load()
     print('\n'+colored('  VPS 多协议节点管理  v'+VERSION,'1;36'))
     print(colored('  Debian / Ubuntu · sing-box · Cloudflare Tunnel','36'))
-    print('  节点服务：'+service_state(SERVICE)+'    Argo：'+service_state('vps-node-argo'))
+    print('  节点服务：'+service_state(SERVICE)+'    Argo：'+service_state('vps-node-argo')+'    订阅：'+service_state('vps-node-sub'))
     print(f'  节点数量：{len(nodes)}    IPv4：{sum(n.get("ip_version","4")=="4" for n in nodes)}    IPv6：{sum(n.get("ip_version")=="6" for n in nodes)}')
     print(colored('  安装与服务','1;37'))
     for row in ['  1. 安装 sing-box / 依赖','  8. 查看服务状态','  9. 查看运行日志',' 10. 重启节点服务']:
         print(colored(row,'32'))
     print(colored('  节点配置','1;37'))
-    for row in ['  2. 添加节点 / 选择协议','  3. 修改域名 / 证书 / 端口 / IPv4·IPv6','  4. 删除节点','  5. 查看节点链接 / 二维码 [k]']:
+    for row in ['  2. 添加单节点（仅 VLESS / VMess / TUIC / HY2）',' 15. 四合一创建 VLESS + VMess + TUIC + HY2','  3. 修改域名 / 证书 / 端口 / IPv4·IPv6','  4. 删除节点','  5. 查看订阅链接 / 二维码 [k]',' 16. 配置 HTTPS 订阅域名',' 17. 更换订阅 Token',' 18. 按客户端导出订阅']:
         print(colored(row,'32'))
     print(colored('  网络与更新','1;37'))
     for row in ['  6. 开启 TCP BBR','  7. 配置 Argo 固定隧道',' 11. 停止 Argo 隧道',' 12. 检查脚本 / 核心 / 隧道组件更新',' 13. 设置脚本更新源',' 14. 从本地新版文件更新']:
@@ -540,7 +752,7 @@ def selftest():
     nodes=[]
     for p in PROTOCOLS:
         nodes.append(dict(id=p,name='测试 '+p,protocol=p,host='example.com',port=20443,uuid=str(uuid.uuid4()),password='a:b@/+=',path='/a b',argo=False,cert='/tmp/fullchain.pem',key='/tmp/key.pem'))
-    assert len(config(nodes)['inbounds']) == 6
+    assert len(config(nodes)['inbounds']) == 4
     for n, (_,link) in zip(nodes,links(nodes)):
         assert '\n' not in link and link.startswith(('ss://' if n['protocol']=='shadowsocks' else n['protocol']+'://'))
     for p in ('vless','vmess'):
@@ -560,7 +772,9 @@ def selftest():
         try: host(invalid)
         except ValueError: pass
         else: raise AssertionError(invalid)
-    print('PASS：6 种配置、IPv4/IPv6、Argo 双地址族回环监听、VMess 编码、IPv6 链接、更新版本/清单校验。未进行 VPS 实机安装测试。')
+    assert len(clash_config(nodes)['proxies'])==4
+    assert len(json.loads(subscription_body(nodes,'singbox'))['outbounds'])==6
+    print('PASS：四协议、IPv4/IPv6、Argo、分享链接与订阅格式。未进行 VPS 实机安装测试。')
 
 def main():
     if '--self-test' in sys.argv: selftest(); return
@@ -569,6 +783,7 @@ def main():
     if not re.search(r'^ID=["\']?(debian|ubuntu)["\']?$',os_release,re.M): raise RuntimeError('仅支持 Debian / Ubuntu')
     if not pathlib.Path('/run/systemd/system').exists(): raise RuntimeError('需要 systemd 环境，不支持普通 Docker 容器')
     os.umask(0o077)
+    if '--serve-subscription' in sys.argv: serve_subscription(); return
     ROOT.mkdir(mode=0o700,exist_ok=True); os.chmod(ROOT,0o700)
     with open(ROOT/'manager.lock','w') as lock:
         try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -588,11 +803,11 @@ def main():
                     if uninstall(): return
                     continue
                 actions={'1':install,'2':add,'3':edit,'4':remove,'5':show,'k':show,'6':bbr,'7':tunnel,
-                         '8':lambda:run('systemctl','--no-pager','status',SERVICE,'vps-node-argo',check=False),
-                         '9':lambda:run('journalctl','--no-pager','-n','80','-u',SERVICE,'-u','vps-node-argo'),
+                         '8':lambda:run('systemctl','--no-pager','status',SERVICE,'vps-node-argo','vps-node-sub',check=False),
+                         '9':lambda:run('journalctl','--no-pager','-n','80','-u',SERVICE,'-u','vps-node-argo','-u','vps-node-sub'),
                          '10':lambda:run('systemctl','restart',SERVICE),
                          '11':lambda:run('systemctl','disable','--now','vps-node-argo'),
-                         '12':check_updates,'13':update_source,'14':local_update}
+                         '12':check_updates,'13':update_source,'14':local_update,'15':four_in_one,'16':subscription_setup,'17':rotate_subscription,'18':subscription_format_menu}
                 if choice not in actions: print('无效选项'); continue
                 actions[choice]()
             except EOFError: return
