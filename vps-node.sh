@@ -14,7 +14,7 @@ from urllib.parse import quote, urlencode, urlsplit, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = pathlib.Path('/etc/vps-node')
-VERSION = '2.0.0'
+VERSION = '2.1.0'
 DEFAULT_UPDATE_SOURCE = 'https://raw.githubusercontent.com/qingxinguayu999-alt/vps-node/main/update.json'
 SERVICE = 'vps-node'
 PROTOCOLS = ['vless', 'vmess', 'tuic', 'hysteria2']
@@ -83,11 +83,14 @@ def links(nodes):
         q = {'sni': h}
         if p in ('vless', 'vmess'):
             q.update(security='tls', type='ws', host=h, path=n['path'])
+            if n.get('cert_mode')=='selfsigned' and not n['argo']:
+                q.update(allowInsecure='1',insecure='1',pcs=n['cert_pin'])
         if p == 'vless':
             q['encryption'] = 'none'
             link = f'vless://{n["uuid"]}@{authority}:{port}?{urlencode(q)}#{label}'
         elif p == 'vmess':
             v = dict(v='2', ps=n['name'], add=h, port=str(port), id=n['uuid'], aid='0', scy='auto', net='ws', type='none', host=h, path=n['path'], tls='tls', sni=h)
+            if n.get('cert_mode')=='selfsigned' and not n['argo']: v.update(insecure='1',allowInsecure=True,pcs=n['cert_pin'])
             link = 'vmess://' + base64.b64encode(json.dumps(v, ensure_ascii=False).encode()).decode()
         elif p == 'tuic':
             q.update(congestion_control='bbr', udp_relay_mode='native', alpn='h3')
@@ -254,10 +257,10 @@ def selfsigned_certificate(address):
         shutil.rmtree(directory)
         raise
 
-def quic_settings(ip_version, previous=None, label='HY2'):
+def quic_settings(ip_version, previous=None, label='HY2', mode_override=None):
     old = previous or {}
     default = '1' if not previous or old.get('cert_mode') == 'selfsigned' else '2'
-    mode = ask(label+' 模式：1 无域名 + 自动自签证书 / 2 自定义域名及证书',default)
+    mode = mode_override or ask(label+' 模式：1 无域名 + 自动自签证书 / 2 自定义域名及证书',default)
     if mode == '1':
         default_ip = old.get('host','') if old.get('cert_mode') == 'selfsigned' else ''
         try:
@@ -273,7 +276,7 @@ def quic_settings(ip_version, previous=None, label='HY2'):
             reusable = run('openssl','x509','-in',old['cert'],'-noout','-checkend','86400',capture=True,check=False).returncode == 0
         if reusable: cert,key,pin = old['cert'],old['key'],cert_fingerprint(old['cert'])
         else: cert,key,pin = selfsigned_certificate(address)
-        print('自签模式：HY2 URI 附证书指纹；TUIC URI 使用跳过验证参数。可导出 sing-box 配置内置可信证书。')
+        print('自签模式：订阅附适用的证书验证参数。请使用支持指纹的客户端，或导出内置可信证书的 sing-box 配置。')
         return dict(host=address,cert_mode='selfsigned',cert=cert,key=key,cert_pin=pin)
     if mode == '2':
         default_host = old.get('host','') if old.get('cert_mode') != 'selfsigned' else ''
@@ -289,6 +292,21 @@ def quic_settings(ip_version, previous=None, label='HY2'):
 
 def hy2_settings(ip_version, previous=None):
     return quic_settings(ip_version,previous,'HY2')
+
+def ws_settings(protocol,ip_version,previous=None):
+    old=previous or {}
+    default='3' if old.get('argo') or (not previous and protocol=='vmess') else '1' if not previous or old.get('cert_mode')=='selfsigned' else '2'
+    mode=ask(protocol.upper()+' 连接模式：1 IP+自签直连 / 2 域名证书直连 / 3 Argo',''+default)
+    if mode=='3':
+        h=host(ask('Argo 公开域名',old.get('host','') if old.get('argo') else ''))
+        try: ipaddress.ip_address(h)
+        except ValueError: pass
+        else: raise ValueError('Argo 需要公开域名，不能填写 IP')
+        return dict(host=h,argo=True,cert_mode='argo')
+    if mode not in ('1','2'): raise ValueError('请输入 1、2 或 3')
+    settings=quic_settings(ip_version,previous,protocol.upper(),mode_override=mode)
+    settings['argo']=False
+    return settings
 
 def choose(nodes):
     if not nodes: raise ValueError('暂无节点')
@@ -322,18 +340,16 @@ def add():
     i = int(ask('选择协议')) - 1
     if not 0 <= i < len(PROTOCOLS): raise ValueError('无效协议')
     p = PROTOCOLS[i]
-    argo = p in ('vless', 'vmess') and ask('通过 Argo 固定隧道？y/n', 'y' if p == 'vmess' else 'n').lower() == 'y'
     ip_version = ip_choice()
-    hy2 = quic_settings(ip_version,label='HY2' if p == 'hysteria2' else 'TUIC') if p in ('hysteria2','tuic') else {}
-    h = hy2['host'] if hy2 else host(ask('节点域名（SS 可填 IP；Argo 填隧道公开域名）'))
+    settings=ws_settings(p,ip_version) if p in ('vless','vmess') else quic_settings(ip_version,label='HY2' if p=='hysteria2' else 'TUIC')
+    argo=settings.get('argo',False); h=settings['host']
     port = int(ask('本机监听端口', str(18080 + len(nodes)) if argo else str(20000 + len(nodes))))
     if not 1 <= port <= 65535: raise ValueError('端口必须是 1–65535')
     if any(n['port'] == port for n in nodes): raise ValueError('脚本中的节点已占用此端口')
     port_free(port, p in ('tuic', 'hysteria2'), argo, ip_version)
     if p == 'shadowsocks': port_free(port, True, False, ip_version)
     n = dict(id=uuid.uuid4().hex, name=ask('节点名称', p), protocol=p, host=h, port=port, uuid=str(uuid.uuid4()), password=secrets.token_urlsafe(24), path='/'+secrets.token_hex(12), argo=argo, ip_version=ip_version)
-    n.update(hy2)
-    if p not in ('shadowsocks','hysteria2','tuic') and not argo: n['cert'], n['key'] = certificate(h)
+    n.update(settings)
     apply(nodes + [n])
     print('节点已添加。请在云安全组/本机防火墙放行：', f'{port}/'+('UDP' if p in ('tuic','hysteria2') else 'TCP+UDP' if p == 'shadowsocks' else 'TCP'))
     if argo: print(f'Cloudflare 隧道 Public hostname 设置 {h} → HTTP 服务 {origin(n)}；再用菜单安装隧道。路径：{n["path"]}')
@@ -343,13 +359,16 @@ def edit():
     nodes = load(); i = choose(nodes); n = copy.deepcopy(nodes[i])
     n['name'] = ask('节点名称', n['name'])
     n['ip_version'] = ip_choice(n.get('ip_version','4'))
-    if n['protocol'] in ('hysteria2','tuic'):
+    if n['protocol'] in ('vless','vmess'):
+        n.update(ws_settings(n['protocol'],n['ip_version'],nodes[i]))
+        if n['argo']:
+            for key in ('cert','key','cert_pin'): n.pop(key,None)
+        elif n.get('cert_mode')!='selfsigned': n.pop('cert_pin',None)
+    elif n['protocol'] in ('hysteria2','tuic'):
         n.update(quic_settings(n['ip_version'],nodes[i],'HY2' if n['protocol']=='hysteria2' else 'TUIC'))
         if n.get('cert_mode') != 'selfsigned': n.pop('cert_pin',None)
     else: n['host'] = host(ask('节点域名/IP', n['host']))
-    if n['protocol'] in ('vless','vmess'):
-        n['argo'] = ask('通过 Argo 固定隧道？y/n','y' if n['argo'] else 'n').lower() == 'y'
-    if n['protocol'] not in ('shadowsocks','hysteria2','tuic') and not n['argo']: n['cert'], n['key'] = certificate(n['host'])
+    if n['protocol'] == 'trojan' and not n['argo']: n['cert'], n['key'] = certificate(n['host'])
     port = int(ask('监听端口', str(n['port'])))
     if not 1 <= port <= 65535 or any(j != i and x['port'] == port for j,x in enumerate(nodes)): raise ValueError('端口无效或重复')
     # 同端口换监听地址时旧服务仍占用端口，交由重启检查与回滚处理。
@@ -426,7 +445,7 @@ def unique_name(n):
 def clash_config(nodes):
     proxies=[]
     for n in client_nodes(nodes):
-        p=n['protocol']; insecure=n.get('cert_mode')=='selfsigned'
+        p=n['protocol']; insecure=n.get('cert_mode')=='selfsigned' and not n['argo']
         x=dict(name=unique_name(n),type=p,server=n['host'],port=443 if n['argo'] else n['port'],udp=True)
         if p in ('vless','vmess'):
             x.update(uuid=n['uuid'],tls=True,network='ws',servername=n['host'])
@@ -439,6 +458,9 @@ def clash_config(nodes):
             if p=='tuic':
                 x.update(uuid=n['uuid'])
                 x['congestion-controller']='bbr'; x['udp-relay-mode']='native'
+        if insecure:
+            x['skip-cert-verify']=True
+            if n.get('cert_pin'): x['fingerprint']=n['cert_pin']
         proxies.append(x)
     names=[p['name'] for p in proxies]
     return {'mixed-port':7890,'allow-lan':False,'mode':'rule','log-level':'info','proxies':proxies,
@@ -449,7 +471,7 @@ def singbox_client(nodes):
     for n in client_nodes(nodes):
         p=n['protocol']; x=dict(type=p,tag=unique_name(n),server=n['host'],server_port=443 if n['argo'] else n['port'])
         tls=dict(enabled=True,server_name=n['host'])
-        if n.get('cert_mode')=='selfsigned': tls['certificate']=pathlib.Path(n['cert']).read_text().splitlines()
+        if n.get('cert_mode')=='selfsigned' and not n['argo']: tls['certificate']=pathlib.Path(n['cert']).read_text().splitlines()
         if p in ('vless','vmess'):
             x['uuid']=n['uuid']; x['transport']={'type':'ws','path':n['path'],'headers':{'Host':n['host']}}
             if p=='vmess': x.update(security='auto',alter_id=0)
@@ -592,8 +614,8 @@ def four_in_one():
     if argo:
         for p in ('vless','vmess'): ws[p]=dict(host=host(ask(p.upper()+' 的 Argo 公开域名')))
     else:
-        h=host(ask('VLESS/VMess 直连证书域名')); cert,key=certificate(h)
-        ws={p:dict(host=h,cert=cert,key=key) for p in ('vless','vmess')}
+        direct=quic_settings(ip_version,label='VLESS/VMess')
+        ws={p:dict(direct) for p in ('vless','vmess')}
     quic=quic_settings(ip_version,label='TUIC/HY2')
     base=int(ask('起始监听端口（将使用连续 4 个）',str(20000+len(nodes)*4)))
     if not 1024<=base<=65532: raise ValueError('起始端口应为 1024–65532')
