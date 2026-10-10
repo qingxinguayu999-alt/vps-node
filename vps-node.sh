@@ -13,7 +13,7 @@ from urllib.request import urlopen
 from urllib.parse import quote, urlencode
 
 ROOT = pathlib.Path('/etc/vps-node')
-VERSION = '1.2.0'
+VERSION = '1.3.0'
 DEFAULT_UPDATE_SOURCE = 'https://raw.githubusercontent.com/qingxinguayu999-alt/vps-node/main/update.json'
 SERVICE = 'vps-node'
 PROTOCOLS = ['vless', 'vmess', 'tuic', 'hysteria2', 'trojan', 'shadowsocks']
@@ -92,7 +92,11 @@ def links(nodes):
             q.update(congestion_control='bbr', udp_relay_mode='native', alpn='h3')
             link = f'tuic://{n["uuid"]}:{quote(n["password"],safe="")}@{authority}:{port}?{urlencode(q)}#{label}'
         elif p in ('hysteria2', 'trojan'):
-            if p == 'hysteria2': q['alpn'] = 'h3'
+            if p == 'hysteria2':
+                q['alpn'] = 'h3'
+                if n.get('cert_mode') == 'selfsigned':
+                    q['insecure'] = '1'
+                    q['pinSHA256'] = n['cert_pin']
             link = f'{p}://{quote(n["password"],safe="")}@{authority}:{port}?{urlencode(q)}#{label}'
         else:
             auth = base64.urlsafe_b64encode(('aes-128-gcm:' + n['password']).encode()).decode().rstrip('=')
@@ -213,6 +217,67 @@ def certificate(h):
         cert, key = str(dst/'fullchain.pem'), str(dst/'privkey.pem')
     return cert, key
 
+def public_ip(ip_version):
+    url = 'https://api6.ipify.org' if ip_version == '6' else 'https://api.ipify.org'
+    try:
+        result = run('curl', '-'+ip_version, '-fsS', '--connect-timeout', '5', '--max-time', '8', url, capture=True)
+        address = ipaddress.ip_address(result.stdout.strip())
+        if str(address.version) == ip_version and address.is_global: return str(address)
+    except (ValueError,OSError,subprocess.CalledProcessError): pass
+    return ''
+
+def cert_fingerprint(cert):
+    pem = pathlib.Path(cert).read_text()
+    return hashlib.sha256(__import__('ssl').PEM_cert_to_DER_cert(pem)).hexdigest()
+
+def selfsigned_certificate(address):
+    ip = ipaddress.ip_address(address)
+    directory = ROOT/'certs'/secrets.token_hex(8)
+    directory.mkdir(parents=True, mode=0o700)
+    cert, key = directory/'fullchain.pem', directory/'privkey.pem'
+    try:
+        run('openssl','req','-x509','-newkey','rsa:2048','-sha256','-nodes','-days','3650',
+            '-keyout',str(key),'-out',str(cert),'-subj','/CN=vps-node-hy2',
+            '-addext','subjectAltName=IP:'+str(ip),capture=True)
+        os.chmod(cert,0o600); os.chmod(key,0o600)
+        return str(cert),str(key),cert_fingerprint(cert)
+    except Exception:
+        shutil.rmtree(directory)
+        raise
+
+def hy2_settings(ip_version, previous=None):
+    old = previous or {}
+    default = '1' if not previous or old.get('cert_mode') == 'selfsigned' else '2'
+    mode = ask('HY2 模式：1 无域名 + 自动自签证书 / 2 自定义域名及证书',default)
+    if mode == '1':
+        default_ip = old.get('host','') if old.get('cert_mode') == 'selfsigned' else ''
+        try:
+            if str(ipaddress.ip_address(default_ip).version) != ip_version: default_ip = ''
+        except ValueError: default_ip = ''
+        if not default_ip: default_ip = public_ip(ip_version)
+        address = ipaddress.ip_address(ask('VPS 公网 IP（自动识别成功可直接回车）',default_ip))
+        if str(address.version) != ip_version or not address.is_global:
+            raise ValueError('请填写所选地址族的可用公网 IP；NAT VPS 需自行设置 UDP 端口映射')
+        address = str(address)
+        reusable = old.get('cert_mode') == 'selfsigned' and old.get('host') == address and pathlib.Path(old.get('cert','')).is_file() and pathlib.Path(old.get('key','')).is_file()
+        if reusable:
+            reusable = run('openssl','x509','-in',old['cert'],'-noout','-checkend','86400',capture=True,check=False).returncode == 0
+        if reusable: cert,key,pin = old['cert'],old['key'],cert_fingerprint(old['cert'])
+        else: cert,key,pin = selfsigned_certificate(address)
+        print('自签模式：分享链接使用 insecure=1 并附 pinSHA256 固定证书指纹；请确认客户端支持并保留指纹。')
+        return dict(host=address,cert_mode='selfsigned',cert=cert,key=key,cert_pin=pin)
+    if mode == '2':
+        default_host = old.get('host','') if old.get('cert_mode') != 'selfsigned' else ''
+        h = host(ask('HY2 节点域名',default_host))
+        try: ipaddress.ip_address(h)
+        except ValueError: pass
+        else: raise ValueError('自定义域名模式请填写域名；公网 IP 请选自签模式')
+        if old.get('cert_mode') != 'selfsigned' and old.get('host') == h and old.get('cert') and ask('保留现有证书？y/n','y').lower() == 'y':
+            cert,key = old['cert'],old['key']
+        else: cert,key = certificate(h)
+        return dict(host=h,cert_mode='custom',cert=cert,key=key)
+    raise ValueError('请输入 1 或 2')
+
 def choose(nodes):
     if not nodes: raise ValueError('暂无节点')
     for i, n in enumerate(nodes, 1): print(f'{i}. {n["name"]}  {n["protocol"]}  {n["host"]}:{n["port"]}  IPv{n.get("ip_version","4")}  Argo={n["argo"]}')
@@ -247,14 +312,16 @@ def add():
     p = PROTOCOLS[i]
     argo = p in ('vless', 'vmess') and ask('通过 Argo 固定隧道？y/n', 'y' if p == 'vmess' else 'n').lower() == 'y'
     ip_version = ip_choice()
-    h = host(ask('节点域名（SS 可填 IP；Argo 填隧道公开域名）'))
+    hy2 = hy2_settings(ip_version) if p == 'hysteria2' else {}
+    h = hy2['host'] if hy2 else host(ask('节点域名（SS 可填 IP；Argo 填隧道公开域名）'))
     port = int(ask('本机监听端口', str(18080 + len(nodes)) if argo else str(20000 + len(nodes))))
     if not 1 <= port <= 65535: raise ValueError('端口必须是 1–65535')
     if any(n['port'] == port for n in nodes): raise ValueError('脚本中的节点已占用此端口')
     port_free(port, p in ('tuic', 'hysteria2'), argo, ip_version)
     if p == 'shadowsocks': port_free(port, True, False, ip_version)
     n = dict(id=uuid.uuid4().hex, name=ask('节点名称', p), protocol=p, host=h, port=port, uuid=str(uuid.uuid4()), password=secrets.token_urlsafe(24), path='/'+secrets.token_hex(12), argo=argo, ip_version=ip_version)
-    if p != 'shadowsocks' and not argo: n['cert'], n['key'] = certificate(h)
+    n.update(hy2)
+    if p not in ('shadowsocks','hysteria2') and not argo: n['cert'], n['key'] = certificate(h)
     apply(nodes + [n])
     print('节点已添加。请在云安全组/本机防火墙放行：', f'{port}/'+('UDP' if p in ('tuic','hysteria2') else 'TCP+UDP' if p == 'shadowsocks' else 'TCP'))
     if argo: print(f'Cloudflare 隧道 Public hostname 设置 {h} → HTTP 服务 {origin(n)}；再用菜单安装隧道。路径：{n["path"]}')
@@ -263,11 +330,14 @@ def add():
 def edit():
     nodes = load(); i = choose(nodes); n = copy.deepcopy(nodes[i])
     n['name'] = ask('节点名称', n['name'])
-    n['host'] = host(ask('节点域名/IP', n['host']))
     n['ip_version'] = ip_choice(n.get('ip_version','4'))
+    if n['protocol'] == 'hysteria2':
+        n.update(hy2_settings(n['ip_version'],nodes[i]))
+        if n.get('cert_mode') != 'selfsigned': n.pop('cert_pin',None)
+    else: n['host'] = host(ask('节点域名/IP', n['host']))
     if n['protocol'] in ('vless','vmess'):
         n['argo'] = ask('通过 Argo 固定隧道？y/n','y' if n['argo'] else 'n').lower() == 'y'
-    if n['protocol'] != 'shadowsocks' and not n['argo']: n['cert'], n['key'] = certificate(n['host'])
+    if n['protocol'] not in ('shadowsocks','hysteria2') and not n['argo']: n['cert'], n['key'] = certificate(n['host'])
     port = int(ask('监听端口', str(n['port'])))
     if not 1 <= port <= 65535 or any(j != i and x['port'] == port for j,x in enumerate(nodes)): raise ValueError('端口无效或重复')
     # 同端口换监听地址时旧服务仍占用端口，交由重启检查与回滚处理。
