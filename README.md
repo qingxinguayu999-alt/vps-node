@@ -1,4 +1,4 @@
-# VPS Node 四合一脚本 v2.0.0
+# VPS Node 四合一脚本 v2.1.0
 
 Debian / Ubuntu 中文菜单脚本，仅新建 **VLESS、VMess、TUIC v5、Hysteria2（HY2）** 四种节点。支持一次创建四合一、Argo 固定隧道、BBR、IPv4/IPv6、域名证书、自签证书，以及一个 HTTPS 订阅链接和二维码。
 
@@ -37,7 +37,7 @@ root 直接输入命令，普通用户加 sudo，例如 `sudo jb`。命令冲突
 
 1. 输入 jb，选择 **15 四合一创建**。
 2. 选择 IPv4 或 IPv6。
-3. VLESS/VMess 默认走 Argo，填写两者的公开域名；推荐分别使用 `vless.你的域名` 和 `vmess.你的域名`。也可选直连 TLS 并申请或导入证书。
+3. VLESS/VMess 默认走 Argo，填写两者的公开域名；推荐分别使用 `vless.你的域名` 和 `vmess.你的域名`。也可选择公网 IP＋自签证书直连，或填写域名并申请/导入证书。
 4. TUIC/HY2 默认选择 **无域名＋自动自签证书**：回车确认自动识别的公网 IP，也可选域名证书模式。
 5. 设置起始端口和名称，脚本一次生成四个节点，校验配置并启动。启动失败恢复此前配置。
 6. 选择配置四合一订阅，填写独立订阅域名，例如 `sub.你的域名`。
@@ -115,7 +115,7 @@ Argo 节点选 IPv4 时本机地址类似 `http://127.0.0.1:20000`；选 IPv6 �
 
 发布新版时提高脚本 VERSION，然后执行 `python3 tools/make_manifest.py` 生成 update.json 与 SHA256SUMS，一起提交。更换仓库需修改默认更新地址、安装器 base_url 和 README 命令。
 
-升级到 v2.0.0 后，不再新建 Trojan/Shadowsocks，也不把它们加入四协议订阅；旧节点保持服务以免无意中断，若不需要用菜单 4 删除。
+升级到 v2.1.0 后，不再新建 Trojan/Shadowsocks，也不把它们加入四协议订阅；旧节点保持服务以免无意中断，若不需要用菜单 4 删除。
 
 ## 文件、服务与验证
 
@@ -148,3 +148,17 @@ MIT 开源许可，第三方核心与依赖遵守各自上游许可。报告问�
 - https://wiki.metacubex.one/en/config/proxies/tuic/
 - https://wiki.metacubex.one/en/config/proxies/hysteria2/
 - https://matsuridayo.github.io/nb4a-configuration/
+
+## VLESS/VMess 连接与证书切换
+
+菜单 2 添加、菜单 3 修改 VLESS/VMess 时，可选：
+
+1. **公网 IP＋自签证书直连**：无需自己的域名，自动生成含 IP 的证书；客户端连接 VPS 的 TCP 端口。
+2. **域名证书直连**：填写域名，申请 Let’s Encrypt 或导入自己的证书和私钥。
+3. **Argo**：填写 Cloudflare 隧道公开域名；客户端使用 Cloudflare HTTPS 证书，源站监听回环地址。VMess 新增时默认此模式。
+
+TUIC/HY2 在菜单 2、3 同样可在自签证书和域名证书之间切换。改动后更新客户端订阅；切换到 Argo 时还需配置 Tunnel 路由，切换到直连时需放行对应端口。
+
+四合一向导选择不走 Argo 后，VLESS/VMess 也可选择自签或域名证书，因此四个节点都可以无需自己的域名使用。**一个 HTTPS 订阅链接仍需要配置订阅域名**；也可直接使用各节点分享链接/二维码。
+
+自签节点导出包含证书信任或指纹参数：sing-box 配置携带公共证书，Clash/Mihomo 配置携带证书指纹，VLESS/VMess 分享链接携带 `pcs`。不同客户端版本对参数支持不同；不识别时使用对应配置格式，或改用受信任的域名证书。未完成所有客户端和 VPS 的实机连通测试。
