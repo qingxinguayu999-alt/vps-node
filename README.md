@@ -1,133 +1,133 @@
-# Debian / Ubuntu VPS 多协议节点脚本 v1.3.0
+# VPS Node 四合一脚本 v2.0.0
 
-## 安装与快捷命令
+Debian / Ubuntu 中文菜单脚本，仅新建 **VLESS、VMess、TUIC v5、Hysteria2（HY2）** 四种节点。支持一次创建四合一、Argo 固定隧道、BBR、IPv4/IPv6、域名证书、自签证书，以及一个 HTTPS 订阅链接和二维码。
 
-项目仓库：https://github.com/qingxinguayu999-alt/vps-node
+项目：https://github.com/qingxinguayu999-alt/vps-node
 
-在自己的 Debian/Ubuntu VPS 上运行以下命令：
+## 安装
+
+在自己的 VPS 上执行：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/qingxinguayu999-alt/vps-node/main/install.sh -o install-vps-node.sh
 sudo bash install-vps-node.sh
 ```
 
-安装器下载并校验脚本 SHA256、检查版本和语法、安装核心与依赖，并注册快捷命令。完成后添加节点即可。需要先有 curl；没有时运行 `sudo apt-get update && sudo apt-get install -y curl`。
+没有 curl 时先安装：
+
+```bash
+sudo apt-get update && sudo apt-get install -y curl
+```
+
+安装器校验脚本版本和 SHA256，检查语法，安装核心及依赖，注册快捷命令。目标系统为带 systemd 的 Debian 12/13、Ubuntu 22.04/24.04；支持常见 amd64/arm64 VPS，需要 root、正常 DNS 和访问上游 APT/GitHub 的网络。普通 Docker 容器不适用，容器中的 BBR 可能受宿主机限制。
+
+也可以上传 vps-node.sh 到服务器后运行 `sudo bash vps-node.sh`，选择菜单 1 安装。
+
+## 快捷命令
 
 | 命令 | 功能 |
 | --- | --- |
 | `jb` | 打开彩色脚本主菜单 |
-| `k` | 查看所有节点的链接和二维码 |
-| `sc` | 确认后卸载脚本及本工具节点 |
-| `vps-node` | 打开主菜单的完整命令 |
+| `k` | 查看一个订阅链接和二维码；未配置订阅时显示单节点链接 |
+| `sc` | 输入 UNINSTALL 确认后卸载本工具 |
 
-root 用户直接输入以上命令；普通用户加 `sudo`，例如 `sudo jb`。如同名命令被占用不会覆盖，可用 `sudo vps-node jb`、`sudo vps-node k`、`sudo vps-node sc`。
+root 直接输入命令，普通用户加 sudo，例如 `sudo jb`。命令冲突时不会覆盖其他程序，可使用 `sudo vps-node jb`、`sudo vps-node k`、`sudo vps-node sc`。
 
-离线下载项目文件后，也能在 VPS 上运行：
+## 四合一创建
 
-```bash
-sudo bash vps-node.sh
-```
+1. 输入 jb，选择 **15 四合一创建**。
+2. 选择 IPv4 或 IPv6。
+3. VLESS/VMess 默认走 Argo，填写两者的公开域名；推荐分别使用 `vless.你的域名` 和 `vmess.你的域名`。也可选直连 TLS 并申请或导入证书。
+4. TUIC/HY2 默认选择 **无域名＋自动自签证书**：回车确认自动识别的公网 IP，也可选域名证书模式。
+5. 设置起始端口和名称，脚本一次生成四个节点，校验配置并启动。启动失败恢复此前配置。
+6. 选择配置四合一订阅，填写独立订阅域名，例如 `sub.你的域名`。
+7. 在 Cloudflare 控制台创建固定 Tunnel，配置下文的公开主机名路由；菜单 7 输入 Tunnel Token。
+8. 输入 k，复制一个订阅链接或扫码，将四种节点一起导入客户端。
 
-先选 **1 安装核心/依赖**，再选 **2 添加节点**。已有旧版：上传新版后选 1 注册新命令，或用菜单 14 更新；配置默认沿用。
+菜单 2 仍支持单独添加四种协议之一。菜单 3 修改节点的名称、域名、证书、端口、地址族、WS 路径或凭据。可以重复创建多组节点，订阅包含全部受支持节点。
 
-设计目标是使用 systemd 的 Debian 12/13、Ubuntu 22.04/24.04，amd64/arm64；脚本检查发行版和 systemd，但本次没有在这些系统的 VPS 上实机验证。需要 root、正常 DNS、访问官方 APT 和 GitHub 的网络。不是 Docker/OpenVZ 专用版本，容器中的 BBR 可能由宿主机决定。
+## 协议与证书
 
-## 已实现
+| 协议 | 默认四合一模式 | 直连放行 |
+| --- | --- | --- |
+| VLESS | WebSocket，经 Argo，客户端 TLS/443 | 改用直连时放行 TCP |
+| VMess | WebSocket，经 Argo，alterId=0 | 改用直连时放行 TCP |
+| TUIC v5 | 公网 IP、UDP/QUIC、自签证书、协议 BBR | UDP |
+| HY2 | 公网 IP、UDP/QUIC、自签证书 | UDP |
 
-| 协议 | 传输 | 证书 | Argo |
-| --- | --- | --- | --- |
-| VLESS | WebSocket + TLS | 直连需证书 | 支持固定隧道 |
-| VMess | WebSocket + TLS，alterId=0 | 直连需证书 | 支持固定隧道 |
-| TUIC v5 | UDP/QUIC，协议 BBR | 需要 | 不支持 |
-| Hysteria2 | UDP/QUIC | 默认自动自签，可换域名证书 | 不支持 |
-| Trojan | TCP + TLS | 需要 | 本版不接入 |
-| Shadowsocks | aes-128-gcm，TCP/UDP | 不需要 | 不支持 |
+TUIC/HY2 添加和修改均可选择无域名自签或自定义域名证书。无域名模式无需 DNS 或 80/TCP，HTTPS 查询所选地址族的公网 IP（ipify）；失败时手动填写。NAT VPS 需自己做好 UDP 端口映射。
 
-可同时添加多个节点。支持修改名称、域名、证书、端口、WebSocket 路径、重新生成 UUID/密码、删除节点、查看服务与日志、重启、导出链接和 PNG/终端二维码。修改会经过 `sing-box check`，启动失败恢复此前配置。
+自签证书包含 IP SAN，有效期约 10 年；IP 不变且证书有效时复用，修改名称或端口不会改变指纹。更换 IP/证书后重新更新客户端订阅。已有域名证书节点不会自动切换到自签。
 
-BBR 单独通过菜单开启，不自动替换内核。系统 TCP BBR 不直接控制 TUIC/Hysteria2 的 QUIC 连接。没有实现 VLESS Reality、XHTTP、订阅 HTTP 服务、临时 Argo 隧道或一键系统升级。
+- HY2 分享 URI：insecure=1，并附 pinSHA256 指纹；客户端需要支持并保留指纹。
+- TUIC 分享 URI：使用 allow_insecure / allowInsecure / insecure 参数，客户端导入方式不同。此 URI 不保证所有客户端能固定证书身份；想保留身份校验，可改用正式域名证书，或导入本工具的 sing-box JSON 配置，它内置自签公有证书作为信任材料，不含私钥。
+- Clash Meta/Mihomo 配置：自签节点带 skip-cert-verify 和证书 fingerprint，请使用支持这些字段的当前核心。
 
-## 域名与证书
+自动申请使用 Certbot HTTP-01：域名 A/AAAA 正确指向 VPS，80/TCP 需空闲、可从公网访问，按菜单同意 Let's Encrypt 条款。不会停止已有 Web 服务抢占 80。启用 certbot.timer 及续期后节点服务重启钩子。
 
-直连 TLS 节点：域名 A/AAAA 正确指向 VPS，关闭该记录的 CDN 代理；放行相应节点端口。添加和修改节点时可选 IPv4（监听 `0.0.0.0`）或 IPv6（监听 `::`）。IPv6 需要 VPS 配有可用 IPv6、正确 AAAA 记录及 IPv6 防火墙放行；`::` 在某些系统/核心版本下也会接收 IPv4，请勿把它当作严格 IPv6-only 隔离。这是入站监听选择，不强制代理出站流量使用对应地址族。旧配置默认仍为 IPv4。
+导入证书填写 fullchain.pem、privkey.pem 的服务器绝对路径，检查期限、域名/IP、公私钥匹配并复制到专用目录；导入证书需自行续期。Cloudflare Origin CA 不是普通客户端默认信任的证书。
 
-自动申请采用 Certbot HTTP-01：80/TCP 需空闲并能从公网访问；邮箱和同意 Let's Encrypt 条款由菜单输入。证书申请不停止已有 Web 服务，80 被占用会失败。自动启用 `certbot.timer` 和续期后服务重启钩子。Cloudflare Origin CA 不是通用客户端信任的证书，不适合普通直连节点。
+直连 TUIC/HY2 使用 CF 管理的域名时设置 **仅 DNS（灰云）**，不能通过普通橙云或本脚本的 Argo 隧道。
 
-导入证书：填服务器上的 fullchain.pem 和 privkey.pem 路径；会检查有效期、域名/IP 和公私钥匹配，复制到专用目录。应使用客户端信任的完整证书链；导入证书需自行续期并再次导入。自定义域名证书模式不关闭客户端证书验证。HY2 默认自签模式的行为见下文。
+## Argo 与 HTTPS 订阅路由
 
-## Argo / Cloudflare Tunnel
+在 Cloudflare 控制台创建远程管理的固定 Tunnel，保存 Token。Public hostname 分别设置：
 
-1. 在 Cloudflare 控制台创建一个固定的、远程管理的 Tunnel，取得 Token。
-2. 添加 VLESS 或 VMess 节点，选择 Argo，填公开节点域名和本机端口。VMess 默认选择 Argo；可改选直连，已有 VMess 节点不自动迁移，可通过修改节点切换到 Argo。
-3. 控制台为此 Tunnel 添加 Public hostname，服务设置为 `http://127.0.0.1:本机端口`（选择 IPv6 时为 `http://[::1]:本机端口`）。每个节点用独立公开主机名。
-4. 选菜单 7，隐藏输入 Token。脚本安装官方 cloudflared 并启用独立服务。
-5. 查看日志，确认 Tunnel 已连接；客户端使用导出的域名、443、TLS、WebSocket 路径。
+| 公开域名 | Service 类型 | Service 地址 |
+| --- | --- | --- |
+| vless.你的域名 | HTTP | 脚本显示的 VLESS 本机地址 |
+| vmess.你的域名 | HTTP | 脚本显示的 VMess 本机地址 |
+| sub.你的域名 | HTTP | http://127.0.0.1:18999（以实际订阅端口为准） |
 
-Token 保存在 root 专用的 `/etc/vps-node/tunnel.env`，不写入进程命令行。本版只有一个固定 Tunnel，可承载多个公开主机名；再次设置 Token 会替换原 Tunnel。停止 Argo 用菜单 11，不会删除 Cloudflare 控制台上的 Tunnel。Argo 本机入站只监听回环地址，客户端到 Cloudflare 使用 TLS。
+Argo 节点选 IPv4 时本机地址类似 `http://127.0.0.1:20000`；选 IPv6 时类似 `http://[::1]:20000`。订阅服务固定监听 IPv4 回环地址，客户端仍通过 Cloudflare HTTPS 访问。
 
-## 端口、文件和备份
+菜单 7 隐藏输入 Token，运行独立 cloudflared 服务。查看菜单 9 日志确认隧道连接。一个 Tunnel 可承载三个主机名。若坚持让 VLESS/VMess 共用域名，需要在 Cloudflare 按两者各自 WS 路径配置不同的 HTTP 服务路由。订阅必须使用独立域名，以免路由冲突。
 
-脚本不自动修改 UFW/iptables 或云安全组。直连 VLESS/VMess/Trojan 放行 TCP，TUIC/Hysteria2 放行 UDP，Shadowsocks 放行 TCP+UDP。Argo 本机端口不用公网放行，但服务器需能出站连接 Cloudflare。
+订阅主机名不要启用需要浏览器登录的 Cloudflare Access 或交互式挑战；不要缓存订阅内容。订阅地址本身带随机 Token，返回 Cache-Control no-store。Token 只保护知道链接的人可访问，不应公开链接或二维码。
 
-配置和凭据位于 `/etc/vps-node/`；链接在 `links.txt`，二维码在 `qr/`。这些文件和二维码都包含可直接使用的访问凭据，不应公开。最新成功修改前的配置保存在 `config.previous.json`、`nodes.previous.json`，包含旧凭据。
+**短链接不是免费的第三方缩短服务**：它由你自己的订阅域名和本机服务提供，类似 `https://sub.你的域名/s/随机Token`。只有完成 Cloudflare 路由、Tunnel 在线后才实际可访问。无需将节点密码上传 GitHub或公共转换站。没配置订阅域名时仍可离线导出本地文件及单节点二维码。
 
-使用专用 `vps-node.service`，不覆盖已有 sing-box 默认配置；仍需避免与其他服务端口冲突。安装会增加 SagerNet APT 源、所需软件包和 systemd 单元。cloudflared 下载的是官方 GitHub latest DEB，经 HTTPS 获取，本版没有做独立哈希锁定。核心后续升级前应备份并验证新版本配置。
+## 客户端导入
 
-## 验证范围
+默认一个订阅地址，根据客户端 User-Agent 自动返回适合的格式。菜单 **18 按客户端导出** 可强制格式，仍使用同一个私有订阅入口，无需第三方转换。
 
-```bash
-bash -n vps-node.sh
-bash vps-node.sh --self-test
-```
+| 客户端 | 推荐导出 | 导入位置 |
+| --- | --- | --- |
+| v2rayN / v2rayNG | 通用 Base64 | 订阅分组 / 添加订阅地址 |
+| Shadowrocket（小火箭） | 通用 Base64 | 添加 Subscribe 类型或支持的订阅扫码入口 |
+| NekoBox（nebox） | 通用 Base64 | 分组 / 订阅 URL；也可导入 sing-box JSON 自定义配置 |
+| Clash Meta / Mihomo | Clash 配置 | 添加远程配置 URL |
+| sing-box | sing-box JSON | 导入完整配置 |
 
-已验证 Bash/Python 语法、六协议配置与链接生成、Argo 回环监听、VMess 编码、域名校验及配置启动失败回滚逻辑。未在真实 VPS 上验证下载/安装、内核 BBR、ACME 申请、Cloudflare Tunnel 握手、客户端兼容性和实际网速。运行时会使用所安装核心的 `sing-box check` 检查配置。TUIC 分享 URI 可能因客户端不同需要手动填写；二维码只是分享 URI 的编码。
+强制格式对应 `?format=base64`、`?format=clash`、`?format=singbox`、`?format=plain`。如果自动识别失效，选择菜单 18 获取相应链接/二维码。
 
-官方参考：
+旧版原始 Clash 核心不支持完整四协议，请用 Clash Meta/Mihomo。客户端必须本身支持 VLESS、VMess、TUIC v5、HY2；本项目不保证旧版本兼容，也未在上述 GUI 客户端完成实机联调。二维码编码的是订阅 URL，应该在客户端“添加订阅”入口使用，不是四个节点强行合成一种新协议。
 
-- https://sing-box.sagernet.org/installation/package-manager/
-- https://sing-box.sagernet.org/configuration/inbound/
-- https://developers.cloudflare.com/tunnel/reference/run-parameters/
+## 菜单与更新
 
-## 新增菜单与快捷命令
+- 1 安装核心及依赖；2 单节点添加；3 修改；4 删除；5/k 查看。
+- 6 TCP BBR；7 Argo；8 状态；9 日志；10 重启节点；11 停止 Argo。
+- 12 检查更新；13 设置更新源；14 导入本地新版脚本。
+- 15 四合一；16 HTTPS 订阅设置；17 换订阅 Token（旧链接失效）；18 按客户端导出。
+- sc 卸载；0 退出。
 
-参考终端截图设计了彩色分组菜单，顶部显示 sing-box/Argo 的真实服务状态、节点总数和 IPv4/IPv6 节点数。设置 `NO_COLOR=1` 可以关闭颜色。
+菜单 12 查询脚本更新清单、APT 的 sing-box Installed/Candidate 和 cloudflared 最新发布。脚本更新需要输入 UPDATE，之后退出并重新运行 jb；运行中的订阅服务会重启加载新版。核心和 cloudflared 不自动升级。
 
-- 菜单中输入 `k`：显示链接和终端二维码。安装后 root 直接输入 `k`，普通用户输入 `sudo k`；也可用 `sudo vps-node k`。
-- 输入 `sc` / `sudo sc`：确认卸载后停止并移除本工具服务、配置、凭据与快捷命令；保留依赖软件包、系统 BBR、ACME 证书、Cloudflare 控制台隧道和原上传脚本。可用 `sudo vps-node sc`。
-- 快捷命令已被其他程序占用时不会覆盖。打开主菜单：root 输入 `jb`，普通用户输入 `sudo jb`；也可用 `sudo vps-node` 或 `sudo vps-node jb`。
-- 从旧版升级到本包：将新版上传到 VPS，运行 `sudo bash vps-node.sh` 后选择 1，安装新版命令与快捷入口；已有节点配置沿用。
+发布新版时提高脚本 VERSION，然后执行 `python3 tools/make_manifest.py` 生成 update.json 与 SHA256SUMS，一起提交。更换仓库需修改默认更新地址、安装器 base_url 和 README 命令。
 
-## 检查更新
+升级到 v2.0.0 后，不再新建 Trojan/Shadowsocks，也不把它们加入四协议订阅；旧节点保持服务以免无意中断，若不需要用菜单 4 删除。
 
-菜单 12 刷新 APT 并显示 sing-box Installed/Candidate，查询已安装 cloudflared 的官方最新版本，并检查管理脚本更新源。它不自动升级核心或 cloudflared。
+## 文件、服务与验证
 
-安装会设置本 GitHub 项目的 `update.json` 为默认更新源。菜单 13 可更改为你控制或信任的 HTTPS JSON 清单地址；格式见 `update.json`。把新版脚本发布到 HTTPS，填写版本号及脚本 SHA256，更新检查会校验哈希、脚本版本和 Bash/Python 语法，确认后更新 `/usr/local/bin/vps-node`。SHA256 校验文件完整性，不替代对发布来源的信任。更新前副本在 `/etc/vps-node/vps-node.previous.sh`，更新后退出并重新打开菜单。
+专用目录 `/etc/vps-node/` 包含配置、凭据、证书和最新回滚副本；不要公开。导出文件：links.txt、subscription.txt、clash.yaml、sing-box-client.json、qr/ 及 subscription-qr.png。Clash 配置采用兼容 YAML 的 JSON 表示。只导出自签公有证书，不导出私钥。
 
-也可通过菜单 14 导入本地新版脚本（版本必须更高）。本地更新不需要更新源。查看脚本哈希：
+服务分别为 vps-node（节点）、vps-node-argo（隧道）、vps-node-sub（订阅）。本工具不覆盖已有 sing-box 默认配置，但需要避免端口冲突。不自动更改云安全组或 UFW/iptables。IPv6 监听 :: 在一些系统中也接收 IPv4；该选项是监听地址族，不强制代理出站地址族。
 
-```bash
-sha256sum vps-node.sh
-```
+BBR 检测内核支持后开启系统 TCP BBR，不替换内核，不等同于 TUIC/HY2 的 QUIC 拥塞控制，也不保证提高网速。
 
-更新功能不会凭空检查未发布的未来版本。IPv4/IPv6、更新校验、快捷入口均进行了本地逻辑检查，安装、卸载、网络更新和真实连通性仍需 VPS 验证。
+sc 卸载停止并删除本工具三个服务、配置、凭据和快捷命令；保留依赖软件包、系统 BBR、ACME 证书、CF 控制台隧道及原上传脚本。
 
-## 常见使用流程
-
-**直连 HY2**：菜单 2 选择 Hysteria2 → 选择 IPv4/IPv6 → 默认选 1 无域名自签 → 回车确认自动识别的公网 IP → 确认端口和名称 → 放行 UDP 端口 → k 导入节点。需要域名证书时选模式 2。
-
-**直连 TUIC**：菜单 2 选择 TUIC → 选择 IPv4/IPv6 → 填自己的域名及端口 → 自动申请或导入证书 → 放行 UDP 端口 → 输入 k 导入节点。使用 Cloudflare DNS 时，节点记录设为仅 DNS（灰云），不能套用普通橙云或本脚本的 Argo。
-
-**VMess + Argo**：Cloudflare 控制台创建固定 Tunnel → 菜单 2 选择 VMess，Argo 默认 y → 填公开域名 → 把脚本显示的本机 HTTP 服务地址配置到 Tunnel 的 Public hostname → 菜单 7 输入 Tunnel Token → 查看日志确认连接 → k 导出。客户端使用域名、443、TLS 和 WebSocket 路径。IPv6 本机服务写作 `http://[::1]:端口`。
-
-**修改节点**：菜单 3 可修改域名、证书、端口、监听地址族、WebSocket 路径和凭据；VLESS/VMess 可切换 Argo/直连。域名路由和 Cloudflare 服务地址需要在控制台同步修改。
-
-## 维护与开源
-
-使用 MIT 许可证，允许他人使用、修改和再分发；外部核心和依赖各自遵循其上游许可证。
-
-发布新版时修改 `VERSION`（必须升高），运行 `python3 tools/make_manifest.py` 同步更新清单和哈希，然后一起提交 `vps-node.sh`、`update.json`、`SHA256SUMS`。更换仓库时还需修改脚本默认更新地址、安装器 base_url 和 README 安装命令。
-
-本地检查：
+本地校验：
 
 ```bash
 bash -n install.sh
@@ -137,19 +137,14 @@ python3 tests/test_manager.py
 sha256sum -c SHA256SUMS
 ```
 
-报告问题时请提供发行版、脚本/核心版本及脱敏日志。不要上传 UUID、密码、Token、私钥、节点链接或二维码。
+已检查回滚、证书生成、订阅内容、HTTP Token 保护、格式切换、动态更新和 Token 轮换。仍未在真实 VPS 上验证安装、ACME、内核 BBR、CF Tunnel 或各 GUI 客户端的实际连通性。
 
-## HY2 无域名 / 自签证书（v1.3.0）
+MIT 开源许可，第三方核心与依赖遵守各自上游许可。报告问题时提供系统/核心/脚本版本和脱敏日志，不要上传节点链接、二维码、UUID、密码、Token 或私钥。
 
-添加 HY2 节点时默认选择模式 1：无域名、公网 IP、自动生成自签证书。脚本按所选 IPv4/IPv6 使用 HTTPS 查询公网 IP（ipify），识别成功后按回车即可；查询失败时手动填写正确的公网 IP。无需 DNS 配置或开放 80/TCP，只需节点 UDP 端口可达。NAT VPS 需要额外做好 UDP 端口映射。
+官方参考：
 
-自签证书带 IP SAN，有效期约 10 年；保存于专用 root 目录。HY2 分享链接包含 `insecure=1` 与 `pinSHA256`，跳过公共 CA 验证并固定本次证书指纹。请确认客户端正确导入并支持证书指纹；客户端若忽略 pinSHA256，则跳过验证会失去服务器身份校验。支持时保留指纹，或将证书导入客户端作为可信证书。客户端兼容性仍需要实机验证。
-
-菜单 3 修改 HY2 时可以选择：
-
-- 模式 1：保留公网 IP 和自签证书。地址不变且证书有效时复用原证书，修改名称/端口不会改变指纹。
-- 模式 2：改用自己的域名，自动申请 Let's Encrypt 或手动导入证书。生成的链接会移除自签模式的 insecure 和 pinSHA256 参数。
-
-也可以从域名证书模式切回无域名自签模式。证书或 IP 改变后需要重新导入链接/二维码。已有域名证书 HY2 节点不会自动切换自签模式。这次仅给 HY2 增加默认自签功能，其他协议维持原证书逻辑。
-
-升级：jb → 菜单 12 检查更新 → 输入 UPDATE → 退出并重新输入 jb。也可重新运行在线安装命令；已有配置保留。
+- https://sing-box.sagernet.org/configuration/
+- https://v2.hysteria.network/docs/developers/URI-Scheme/
+- https://wiki.metacubex.one/en/config/proxies/tuic/
+- https://wiki.metacubex.one/en/config/proxies/hysteria2/
+- https://matsuridayo.github.io/nb4a-configuration/
