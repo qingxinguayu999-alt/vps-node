@@ -1,4 +1,4 @@
-# Debian / Ubuntu VPS 多协议节点脚本 v1.2.0
+# Debian / Ubuntu VPS 多协议节点脚本 v1.3.0
 
 ## 安装与快捷命令
 
@@ -39,7 +39,7 @@ sudo bash vps-node.sh
 | VLESS | WebSocket + TLS | 直连需证书 | 支持固定隧道 |
 | VMess | WebSocket + TLS，alterId=0 | 直连需证书 | 支持固定隧道 |
 | TUIC v5 | UDP/QUIC，协议 BBR | 需要 | 不支持 |
-| Hysteria2 | UDP/QUIC | 需要 | 不支持 |
+| Hysteria2 | UDP/QUIC | 默认自动自签，可换域名证书 | 不支持 |
 | Trojan | TCP + TLS | 需要 | 本版不接入 |
 | Shadowsocks | aes-128-gcm，TCP/UDP | 不需要 | 不支持 |
 
@@ -53,7 +53,7 @@ BBR 单独通过菜单开启，不自动替换内核。系统 TCP BBR 不直接�
 
 自动申请采用 Certbot HTTP-01：80/TCP 需空闲并能从公网访问；邮箱和同意 Let's Encrypt 条款由菜单输入。证书申请不停止已有 Web 服务，80 被占用会失败。自动启用 `certbot.timer` 和续期后服务重启钩子。Cloudflare Origin CA 不是通用客户端信任的证书，不适合普通直连节点。
 
-导入证书：填服务器上的 fullchain.pem 和 privkey.pem 路径；会检查有效期、域名/IP 和公私钥匹配，复制到专用目录。应使用客户端信任的完整证书链；导入证书需自行续期并再次导入。不会默认关闭客户端证书验证。
+导入证书：填服务器上的 fullchain.pem 和 privkey.pem 路径；会检查有效期、域名/IP 和公私钥匹配，复制到专用目录。应使用客户端信任的完整证书链；导入证书需自行续期并再次导入。自定义域名证书模式不关闭客户端证书验证。HY2 默认自签模式的行为见下文。
 
 ## Argo / Cloudflare Tunnel
 
@@ -113,7 +113,9 @@ sha256sum vps-node.sh
 
 ## 常见使用流程
 
-**直连 HY2 / TUIC**：菜单 2 选择协议 → 选择 IPv4/IPv6 → 填自己的域名及端口 → 自动申请或导入证书 → 放行 UDP 端口 → 输入 k 导入节点。使用 Cloudflare DNS 时，节点记录设为仅 DNS（灰云），不能套用普通橙云或本脚本的 Argo。
+**直连 HY2**：菜单 2 选择 Hysteria2 → 选择 IPv4/IPv6 → 默认选 1 无域名自签 → 回车确认自动识别的公网 IP → 确认端口和名称 → 放行 UDP 端口 → k 导入节点。需要域名证书时选模式 2。
+
+**直连 TUIC**：菜单 2 选择 TUIC → 选择 IPv4/IPv6 → 填自己的域名及端口 → 自动申请或导入证书 → 放行 UDP 端口 → 输入 k 导入节点。使用 Cloudflare DNS 时，节点记录设为仅 DNS（灰云），不能套用普通橙云或本脚本的 Argo。
 
 **VMess + Argo**：Cloudflare 控制台创建固定 Tunnel → 菜单 2 选择 VMess，Argo 默认 y → 填公开域名 → 把脚本显示的本机 HTTP 服务地址配置到 Tunnel 的 Public hostname → 菜单 7 输入 Tunnel Token → 查看日志确认连接 → k 导出。客户端使用域名、443、TLS 和 WebSocket 路径。IPv6 本机服务写作 `http://[::1]:端口`。
 
@@ -136,3 +138,18 @@ sha256sum -c SHA256SUMS
 ```
 
 报告问题时请提供发行版、脚本/核心版本及脱敏日志。不要上传 UUID、密码、Token、私钥、节点链接或二维码。
+
+## HY2 无域名 / 自签证书（v1.3.0）
+
+添加 HY2 节点时默认选择模式 1：无域名、公网 IP、自动生成自签证书。脚本按所选 IPv4/IPv6 使用 HTTPS 查询公网 IP（ipify），识别成功后按回车即可；查询失败时手动填写正确的公网 IP。无需 DNS 配置或开放 80/TCP，只需节点 UDP 端口可达。NAT VPS 需要额外做好 UDP 端口映射。
+
+自签证书带 IP SAN，有效期约 10 年；保存于专用 root 目录。HY2 分享链接包含 `insecure=1` 与 `pinSHA256`，跳过公共 CA 验证并固定本次证书指纹。请确认客户端正确导入并支持证书指纹；客户端若忽略 pinSHA256，则跳过验证会失去服务器身份校验。支持时保留指纹，或将证书导入客户端作为可信证书。客户端兼容性仍需要实机验证。
+
+菜单 3 修改 HY2 时可以选择：
+
+- 模式 1：保留公网 IP 和自签证书。地址不变且证书有效时复用原证书，修改名称/端口不会改变指纹。
+- 模式 2：改用自己的域名，自动申请 Let's Encrypt 或手动导入证书。生成的链接会移除自签模式的 insecure 和 pinSHA256 参数。
+
+也可以从域名证书模式切回无域名自签模式。证书或 IP 改变后需要重新导入链接/二维码。已有域名证书 HY2 节点不会自动切换自签模式。这次仅给 HY2 增加默认自签功能，其他协议维持原证书逻辑。
+
+升级：jb → 菜单 12 检查更新 → 输入 UPDATE → 退出并重新输入 jb。也可重新运行在线安装命令；已有配置保留。
