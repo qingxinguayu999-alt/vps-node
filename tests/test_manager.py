@@ -5,6 +5,7 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / 'vps-node.sh'
@@ -54,5 +55,44 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(g['config']([node])['inbounds'][0]['listen'],'::1')
         self.assertEqual(g['origin'](node),'http://[::1]:18080')
         self.assertNotIn('tls',g['config']([node])['inbounds'][0])
+
+    def test_selfsigned_hy2_cert_and_uri(self):
+        for address in ('8.8.8.8','2606:4700:4700::1111'):
+            with self.subTest(address=address), tempfile.TemporaryDirectory() as d:
+                g=manager(); g['ROOT']=pathlib.Path(d)
+                cert,key,pin=g['selfsigned_certificate'](address)
+                self.assertEqual(len(pin),64)
+                result=subprocess.run(['openssl','x509','-in',cert,'-noout','-checkip',address],check=True,text=True,capture_output=True)
+                self.assertIn('does match certificate',result.stdout)
+                node=dict(id='hy2',name='HY2',protocol='hysteria2',host=address,port=20443,argo=False,password='a:@/b',cert=cert,key=key,cert_mode='selfsigned',cert_pin=pin)
+                link=g['links']([node])[0][1]; parsed=urlsplit(link)
+                self.assertEqual(parsed.hostname,address)
+                q=parse_qs(parsed.query)
+                self.assertEqual(q['insecure'],['1']); self.assertEqual(q['pinSHA256'],[pin])
+                node['cert_mode']='custom'; node['host']='hy2.example.com'
+                q=parse_qs(urlsplit(g['links']([node])[0][1]).query)
+                self.assertNotIn('insecure',q); self.assertNotIn('pinSHA256',q)
+
+    def test_hy2_defaults_and_preserves_selfsigned_certificate(self):
+        with tempfile.TemporaryDirectory() as d:
+            g=manager(); g['ROOT']=pathlib.Path(d); g['public_ip']=lambda family:'8.8.8.8'
+            prompts=[]
+            def defaults(text,default=''): prompts.append(default); return default
+            g['ask']=defaults
+            new=g['hy2_settings']('4')
+            self.assertEqual(prompts[0],'1'); self.assertEqual(new['host'],'8.8.8.8')
+            old=dict(new)
+            existing=g['hy2_settings']('4',old)
+            self.assertEqual(existing['cert'],old['cert']); self.assertEqual(existing['cert_pin'],old['cert_pin'])
+
+    def test_hy2_custom_mode_and_legacy_node(self):
+        g=manager(); prompts=[]
+        old=dict(host='hy2.example.com',cert='/tmp/cert',key='/tmp/key')
+        def defaults(text,default=''): prompts.append(default); return default
+        g['ask']=defaults
+        custom=g['hy2_settings']('4',old)
+        self.assertEqual(prompts[0],'2')
+        self.assertEqual(custom['cert_mode'],'custom'); self.assertEqual(custom['cert'],old['cert'])
+        self.assertNotIn('cert_pin',custom)
 
 if __name__ == '__main__': unittest.main()
