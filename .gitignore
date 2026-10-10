@@ -6,3 +6,9 @@ __pycache__/
 nodes.json
 links.txt
 qr/
+subscription.json
+subscription.txt
+subscription-url.txt
+subscription-qr.png
+clash.yaml
+sing-box-client.json
