@@ -100,6 +100,50 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(custom['cert_mode'],'custom'); self.assertEqual(custom['cert'],old['cert'])
         self.assertNotIn('cert_pin',custom)
 
+    def test_ws_selfsigned_exports_ipv4_ipv6(self):
+        for address in ('8.8.8.8','2606:4700:4700::1111'):
+            with tempfile.TemporaryDirectory() as d:
+                g=manager();g['ROOT']=pathlib.Path(d)
+                cert,key,pin=g['selfsigned_certificate'](address)
+                for protocol in ('vless','vmess'):
+                    n=dict(id=protocol,name=protocol,protocol=protocol,host=address,port=20443,argo=False,uuid='00000000-0000-4000-8000-000000000000',path='/ws',cert=cert,key=key,cert_mode='selfsigned',cert_pin=pin)
+                    link=g['links']([n])[0][1]
+                    if protocol=='vless':
+                        self.assertEqual(urlsplit(link).hostname,address)
+                        self.assertEqual(parse_qs(urlsplit(link).query)['pcs'],[pin])
+                    else:
+                        payload=json.loads(base64.b64decode(link.split('://',1)[1]))
+                        self.assertEqual(payload['pcs'],pin);self.assertEqual(payload['add'],address)
+                    self.assertEqual(g['clash_config']([n])['proxies'][0]['fingerprint'],pin)
+                    self.assertIn('certificate',g['singbox_client']([n])['outbounds'][1]['tls'])
+                    self.assertEqual(g['config']([n])['inbounds'][0]['tls']['certificate_path'],cert)
+
+    def test_edit_ws_mode_switch_cleans_old_fields(self):
+        for protocol in ('vless','vmess'):
+            for mode in ('selfsigned','custom','argo'):
+                g=manager();captured=[]
+                old=dict(id='id',name='name',protocol=protocol,host='old.example.com',port=20443,argo=False,ip_version='4',uuid='uuid',path='/ws',cert='/oldcert',key='/oldkey',cert_mode='selfsigned',cert_pin='oldpin')
+                settings=dict(host='new.example.com',argo=mode=='argo',cert_mode=mode)
+                if mode!='argo':settings.update(cert='/newcert',key='/newkey')
+                if mode=='selfsigned':settings.update(host='8.8.8.8',cert_pin='newpin')
+                g['load']=lambda:[old];g['choose']=lambda nodes:0;g['ask']=lambda text,default='':default
+                g['ws_settings']=lambda *args:settings;g['apply']=lambda nodes:captured.extend(nodes)
+                g['certificate']=lambda *args:self.fail('unnecessary second certificate prompt')
+                g['edit']();n=captured[0]
+                self.assertEqual(n['cert_mode'],mode)
+                if mode=='argo':self.assertFalse(any(k in n for k in ('cert','key','cert_pin')))
+                elif mode=='custom':self.assertNotIn('cert_pin',n)
+                else:self.assertEqual(n['cert_pin'],'newpin')
+
+    def test_ws_modes_and_default(self):
+        g=manager();g['ask']=lambda text,default='':'vmess.example.com' if '公开域名' in text else default
+        self.assertEqual(g['ws_settings']('vmess','4')['cert_mode'],'argo')
+        for mode in ('1','2'):
+            g['ask']=lambda text,default='',m=mode:m
+            g['quic_settings']=lambda *args,**kwargs:dict(host='example.com',cert_mode='selfsigned' if kwargs['mode_override']=='1' else 'custom')
+            settings=g['ws_settings']('vless','4')
+            self.assertFalse(settings['argo']);self.assertEqual(settings['cert_mode'],'selfsigned' if mode=='1' else 'custom')
+
     def fixtures(self,g):
         cert,key,pin=g['selfsigned_certificate']('8.8.8.8')
         return [dict(id='id-'+p,name='same-name',protocol=p,host='ws.example.com' if p in ('vless','vmess') else '8.8.8.8',port=20000+i,uuid='00000000-0000-4000-8000-000000000000',password='SECRET_PASSWORD',path='/ws-'+p,argo=p in ('vless','vmess'),ip_version='4',cert=cert,key=key,cert_mode='custom' if p in ('vless','vmess') else 'selfsigned',cert_pin=pin) for i,p in enumerate(g['PROTOCOLS'])]
