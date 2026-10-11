@@ -8,6 +8,10 @@ import unittest
 import json
 import base64
 import threading
+import os
+import pty
+import select
+import signal
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
@@ -143,6 +147,37 @@ class ManagerTests(unittest.TestCase):
             g['quic_settings']=lambda *args,**kwargs:dict(host='example.com',cert_mode='selfsigned' if kwargs['mode_override']=='1' else 'custom')
             settings=g['ws_settings']('vless','4')
             self.assertFalse(settings['argo']);self.assertEqual(settings['cert_mode'],'selfsigned' if mode=='1' else 'custom')
+
+    def test_real_terminal_prompt_is_not_seekable(self):
+        pid,master=pty.fork()
+        if pid==0:
+            try:
+                g=manager()
+                value=g['ask']('TEST_PROMPT','default')
+                print('RESULT='+value,flush=True)
+                os._exit(0)
+            except Exception as e:
+                print('ERROR='+str(e),flush=True);os._exit(1)
+        try:
+            ready,_,_=select.select([master],[],[],5)
+            self.assertTrue(ready,'terminal prompt missing')
+            output=os.read(master,4096)
+            self.assertIn(b'TEST_PROMPT',output)
+            os.write(master,b'hello\n')
+            while b'RESULT=hello' not in output:
+                ready,_,_=select.select([master],[],[],5)
+                self.assertTrue(ready,'terminal input stalled')
+                try:chunk=os.read(master,4096)
+                except OSError:break
+                if not chunk:break
+                output+=chunk
+            self.assertIn(b'RESULT=hello',output)
+            _,status=os.waitpid(pid,0);pid=None
+            self.assertEqual(os.waitstatus_to_exitcode(status),0)
+        finally:
+            os.close(master)
+            if pid is not None:
+                os.kill(pid,signal.SIGKILL);os.waitpid(pid,0)
 
     def fixtures(self,g):
         cert,key,pin=g['selfsigned_certificate']('8.8.8.8')
