@@ -179,6 +179,41 @@ class ManagerTests(unittest.TestCase):
             if pid is not None:
                 os.kill(pid,signal.SIGKILL);os.waitpid(pid,0)
 
+    def test_lock_recovery_free_and_active_manager(self):
+        with tempfile.TemporaryDirectory() as d:
+            g=manager();g['ROOT']=pathlib.Path(d)
+            g['ask']=lambda *args:'STOP'
+            g['recover_manager']()
+            path=g['ROOT']/'manager.lock'
+            program="import fcntl,time,sys; f=open(sys.argv[1],'a+'); fcntl.flock(f,fcntl.LOCK_EX); print('LOCKED',flush=True); time.sleep(30)"
+            child=subprocess.Popen(['python3','-c',program,str(path)],env=dict(os.environ,VPS_NODE_SCRIPT='/usr/local/bin/vps-node'),stdout=subprocess.PIPE,text=True)
+            try:
+                self.assertEqual(child.stdout.readline().strip(),'LOCKED')
+                # 执行环境未挂载 /proc；模拟进程元数据，保留真实跨进程 flock/SIGTERM。
+                original_text=pathlib.Path.read_text;original_bytes=pathlib.Path.read_bytes
+                stat=path.stat()
+                def read_text(p,*a,**k):
+                    if str(p)=='/proc/locks':
+                        return '' if child.poll() is not None else f'1: FLOCK ADVISORY WRITE {child.pid} {os.major(stat.st_dev):x}:{os.minor(stat.st_dev):x}:{stat.st_ino} 0 EOF'
+                    return original_text(p,*a,**k)
+                def read_bytes(p,*a,**k):
+                    if str(p)==f'/proc/{child.pid}/cmdline':return b'python3\0-c\0'
+                    if str(p)==f'/proc/{child.pid}/environ':return b'VPS_NODE_SCRIPT=/usr/local/bin/vps-node\0'
+                    return original_bytes(p,*a,**k)
+                with patch.object(pathlib.Path,'read_text',read_text),patch.object(pathlib.Path,'read_bytes',read_bytes):
+                    self.assertEqual(g['lock_owner'](path),child.pid)
+                    g['recover_manager']()
+                    child.wait(timeout=3)
+                    self.assertIsNone(g['lock_owner'](path))
+            finally:
+                if child.poll() is None:child.terminate();child.wait()
+                child.stdout.close()
+
+    def test_external_command_timeout_is_actionable(self):
+        g=manager()
+        with patch('subprocess.run',side_effect=subprocess.TimeoutExpired('curl',120)):
+            with self.assertRaisesRegex(RuntimeError,'执行超时'):g['run']('curl','https://example.com')
+
     def fixtures(self,g):
         cert,key,pin=g['selfsigned_certificate']('8.8.8.8')
         return [dict(id='id-'+p,name='same-name',protocol=p,host='ws.example.com' if p in ('vless','vmess') else '8.8.8.8',port=20000+i,uuid='00000000-0000-4000-8000-000000000000',password='SECRET_PASSWORD',path='/ws-'+p,argo=p in ('vless','vmess'),ip_version='4',cert=cert,key=key,cert_mode='custom' if p in ('vless','vmess') else 'selfsigned',cert_pin=pin) for i,p in enumerate(g['PROTOCOLS'])]
