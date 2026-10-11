@@ -12,8 +12,8 @@ apt-get install -y ca-certificates curl python3
 base_url='https://raw.githubusercontent.com/qingxinguayu999-alt/vps-node/main'
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
-curl --proto '=https' --proto-redir '=https' -fSL --retry 3 "$base_url/vps-node.sh" -o "$work_dir/vps-node.sh"
-curl --proto '=https' --proto-redir '=https' -fSL --retry 3 "$base_url/update.json" -o "$work_dir/update.json"
+curl --proto '=https' --proto-redir '=https' -fSL --connect-timeout 10 --max-time 120 --retry 3 "$base_url/vps-node.sh" -o "$work_dir/vps-node.sh"
+curl --proto '=https' --proto-redir '=https' -fSL --connect-timeout 10 --max-time 120 --retry 3 "$base_url/update.json" -o "$work_dir/update.json"
 python3 - "$work_dir" <<'PY'
 import hashlib,json,pathlib,re,sys
 p=pathlib.Path(sys.argv[1]); manifest=json.loads((p/'update.json').read_text())
