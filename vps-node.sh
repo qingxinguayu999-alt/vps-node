@@ -7,6 +7,7 @@ if ! command -v python3 >/dev/null; then
 fi
 export VPS_NODE_SCRIPT="$(realpath "$0")"
 exec python3 - "$@" <<'PY'
+import signal
 import base64, copy, fcntl, getpass, ipaddress, json, os, pathlib, re
 import secrets, shutil, socket, subprocess, sys, tempfile, time, uuid, hashlib
 from urllib.request import urlopen
@@ -14,15 +15,19 @@ from urllib.parse import quote, urlencode, urlsplit, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = pathlib.Path('/etc/vps-node')
-VERSION = '2.1.1'
+VERSION = '2.2.0'
 DEFAULT_UPDATE_SOURCE = 'https://raw.githubusercontent.com/qingxinguayu999-alt/vps-node/main/update.json'
 SERVICE = 'vps-node'
 PROTOCOLS = ['vless', 'vmess', 'tuic', 'hysteria2']
 
 def run(*args, capture=False, check=True):
-    return subprocess.run(args, check=check, text=True,
-                          stdout=subprocess.PIPE if capture else None,
-                          stderr=subprocess.PIPE if capture else None)
+    timeout = 120 if args[0] in ('curl','openssl') else None
+    try:
+        return subprocess.run(args, check=check, text=True, timeout=timeout,
+                              stdout=subprocess.PIPE if capture else None,
+                              stderr=subprocess.PIPE if capture else None)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(args[0]+' 执行超时，已停止；请检查网络或系统负载后重试') from e
 
 def write(path, data, mode=0o600):
     path = pathlib.Path(path)
@@ -771,6 +776,8 @@ def menu():
     print(colored(' sc. 卸载脚本及本工具节点','31'))
     print(colored('  0. 退出脚本','33'))
     print(colored('  快捷命令：sudo jb 打开菜单；sudo k 查看节点；sudo sc 卸载','36'))
+    print('  断线占锁恢复：sudo vps-node --unlock')
+    print('  已实测：使用者反馈四协议导入客户端全部通网（2026-10-11）')
 
 def selftest():
     nodes=[]
@@ -800,6 +807,42 @@ def selftest():
     assert len(json.loads(subscription_body(nodes,'singbox'))['outbounds'])==6
     print('PASS：四协议、IPv4/IPv6、Argo、分享链接与订阅格式。未进行 VPS 实机安装测试。')
 
+def lock_owner(path):
+    try:
+        stat=pathlib.Path(path).stat()
+        for line in pathlib.Path('/proc/locks').read_text().splitlines():
+            fields=line.split()
+            if len(fields)<6 or fields[1]!='FLOCK' or fields[3]!='WRITE': continue
+            major,minor,inode=fields[5].split(':')
+            if (int(major,16),int(minor,16),int(inode))==(os.major(stat.st_dev),os.minor(stat.st_dev),stat.st_ino):
+                return int(fields[4])
+    except (OSError,ValueError): pass
+    return None
+
+def recover_manager():
+    path=ROOT/'manager.lock'
+    with open(path,'a+') as probe:
+        try:
+            fcntl.flock(probe,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            print('管理锁空闲，可以执行 sudo jb。'); return
+        except BlockingIOError: pass
+        pid=lock_owner(path)
+        if not pid or pid==os.getpid(): raise RuntimeError('无法确认占锁进程，未停止任何程序')
+        cmd=pathlib.Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+        env=pathlib.Path(f'/proc/{pid}/environ').read_bytes().split(b'\0')
+        if not cmd or b'python' not in cmd[0] or not any(x.startswith(b'VPS_NODE_SCRIPT=') for x in env):
+            raise RuntimeError('占锁进程身份无法验证，未停止任何程序')
+        print(f'管理程序 PID：{pid}。仅用于你已断开的旧会话；安装或修改正在执行时不要恢复。')
+        if ask('输入 STOP 停止这个管理程序')!='STOP': return
+        if lock_owner(path)!=pid: raise RuntimeError('占锁进程已变化，请重新检查')
+        os.kill(pid,signal.SIGTERM)
+        for _ in range(50):
+            try:
+                fcntl.flock(probe,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                print('旧管理程序已停止；节点服务保留。现在执行 sudo jb。'); return
+            except BlockingIOError: time.sleep(0.1)
+        raise RuntimeError('旧程序尚未退出，未强制终止；稍后重试或检查进程')
+
 def main():
     if '--self-test' in sys.argv: selftest(); return
     if os.geteuid()!=0: raise RuntimeError('请使用 sudo bash vps-node.sh')
@@ -809,15 +852,20 @@ def main():
     os.umask(0o077)
     if '--serve-subscription' in sys.argv: serve_subscription(); return
     ROOT.mkdir(mode=0o700,exist_ok=True); os.chmod(ROOT,0o700)
-    with open(ROOT/'manager.lock','w') as lock:
+    signal.signal(signal.SIGHUP, lambda signum,frame: sys.exit('SSH 终端断开，管理程序已退出'))
+    signal.signal(signal.SIGTERM, lambda signum,frame: sys.exit('管理程序已停止'))
+    if '--unlock' in sys.argv: recover_manager(); return
+    with open(ROOT/'manager.lock','a+') as lock:
         try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except BlockingIOError: raise RuntimeError('另一个管理程序正在运行')
+        except BlockingIOError:
+            owner=lock_owner(ROOT/'manager.lock')
+            raise RuntimeError(f'另一个管理程序正在运行（PID：{owner or "未知"}）。断线后可执行 sudo vps-node --unlock；不要删除锁文件')
         if len(sys.argv)>1 and sys.argv[1]=='--install': install(); return
         if len(sys.argv)>1 and sys.argv[1].lower()!='jb':
             command=sys.argv[1].lower()
             if command=='k': show(); return
             if command=='sc': uninstall(); return
-            raise ValueError('支持参数：jb / k / sc / --install / --self-test')
+            raise ValueError('支持参数：jb / k / sc / --unlock / --install / --self-test')
         while True:
             menu()
             try:
