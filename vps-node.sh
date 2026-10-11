@@ -14,7 +14,7 @@ from urllib.parse import quote, urlencode, urlsplit, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = pathlib.Path('/etc/vps-node')
-VERSION = '2.1.0'
+VERSION = '2.1.1'
 DEFAULT_UPDATE_SOURCE = 'https://raw.githubusercontent.com/qingxinguayu999-alt/vps-node/main/update.json'
 SERVICE = 'vps-node'
 PROTOCOLS = ['vless', 'vmess', 'tuic', 'hysteria2']
@@ -39,12 +39,14 @@ def write(path, data, mode=0o600):
         if os.path.exists(tmp): os.unlink(tmp)
 
 def ask(text, default=''):
-    with open('/dev/tty', 'r+') as tty:
-        tty.write(text + (f' [{default}]' if default else '') + ': ')
-        tty.flush()
-        value = tty.readline()
-        if not value: raise EOFError('终端输入结束')
-        return value.strip() or default
+    # 终端不可 seek；读写分别打开，不能使用 TextIOWrapper 的 r+ 模式。
+    with open('/dev/tty', 'w') as output:
+        output.write(text + (f' [{default}]' if default else '') + ': ')
+        output.flush()
+    with open('/dev/tty', 'r') as terminal:
+        value = terminal.readline()
+    if not value: raise EOFError('终端输入结束')
+    return value.strip() or default
 
 def host(value):
     value = value.strip().strip('[]')
@@ -820,6 +822,10 @@ def main():
             menu()
             try:
                 choice=ask('选择').lower()
+            except EOFError: return
+            except OSError as e:
+                raise RuntimeError('无法读取终端输入，已停止菜单以避免循环刷新：'+str(e)) from e
+            try:
                 if choice=='0': return
                 if choice=='sc':
                     if uninstall(): return
