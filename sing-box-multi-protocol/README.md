@@ -42,6 +42,18 @@ jiaoben
 sing-box-node
 ```
 
+彻底卸载可以输入：
+
+```bash
+sc
+```
+
+为防止误删，必须再输入大写 `DELETE` 才会执行。若系统原本已有同名 `sc` 命令，安装器不会覆盖它，请改用：
+
+```bash
+sing-box-node uninstall
+```
+
 重复执行安装命令属于更新脚本，不会删除 `/etc/sing-box/node.env` 中已经保存的端口和节点凭据。
 
 ## 端口映射示例
@@ -120,6 +132,9 @@ systemctl status sing-box --no-pager
 
 # 查看最近日志
 journalctl -u sing-box -n 100 --no-pager
+
+# 彻底卸载（随后输入 DELETE 确认）
+sc
 ```
 
 ## 文件位置
@@ -129,6 +144,7 @@ journalctl -u sing-box -n 100 --no-pager
 | sing-box 内核 | `/usr/local/bin/sing-box` |
 | 中文管理脚本 | `/usr/local/sbin/sing-box-node` |
 | 快捷命令 | `/usr/local/bin/jiaoben` |
+| 卸载快捷命令 | `/usr/local/bin/sc` |
 | sing-box 配置 | `/etc/sing-box/config.json` |
 | 管理器状态 | `/etc/sing-box/node.env` |
 | TLS 证书 | `/etc/sing-box/server.crt` |
@@ -141,4 +157,5 @@ journalctl -u sing-box -n 100 --no-pager
 - Hysteria2 链接包含自签证书指纹；TUIC 使用自签证书兼容模式。
 - VMess 节点采用原生 TCP，不带 TLS，主要用于客户端兼容；优先使用 VLESS Reality。
 - 重新生成某协议凭据后，该协议旧链接会立即失效。
+- `sc` 完整卸载会删除 sing-box 服务、内核、配置、凭据、证书、备份、分享链接、管理脚本和对应 UFW 端口规则；系统共用基础软件及系统日志不会删除。
 - 请遵守服务器提供商条款及所在地法律法规。
