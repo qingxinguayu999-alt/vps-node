@@ -2,9 +2,9 @@
 set -Eeuo pipefail
 
 readonly MANAGER_URL="https://raw.githubusercontent.com/qingxinguayu999-alt/vps-node/main/sing-box-multi-protocol/sing-box-node-manager.sh"
-readonly MANAGER_SHA256="768b8d0d5d9a63b7b1fcbdf8146f0f76812f03fc98d969fb9f3cc41bd23decd8"
+readonly MANAGER_SHA256="ac7c573379312d3f02a505c04d4473c46792f84ff2e400ff715ce54f5b25a5e3"
 readonly MANAGER_PATH="/usr/local/sbin/sing-box-node"
-readonly SHORTCUT_PATH="/usr/local/bin/jiaoben"
+readonly UNINSTALL_SHORTCUT_PATH="/usr/local/bin/sc"
 
 [[ "$EUID" -eq 0 ]] || { printf '错误：请使用 root 运行。\n' >&2; exit 1; }
 [[ "$(uname -m)" == "x86_64" ]] || { printf '错误：目前仅支持 Linux amd64。\n' >&2; exit 1; }
@@ -20,6 +20,11 @@ printf '%s  %s\n' "$MANAGER_SHA256" "$temporary_file" | sha256sum -c - >/dev/nul
 
 install -d -m 0755 /usr/local/sbin /usr/local/bin
 install -m 0755 "$temporary_file" "$MANAGER_PATH"
-ln -sfn "$MANAGER_PATH" "$SHORTCUT_PATH"
+"$MANAGER_PATH" --install-shortcuts
 
 printf '\n安装完成。输入下面的命令打开中文菜单：\n\n  jiaoben\n\n'
+if [[ -L "$UNINSTALL_SHORTCUT_PATH" && "$(readlink -f "$UNINSTALL_SHORTCUT_PATH")" == "$MANAGER_PATH" ]]; then
+  printf '彻底卸载请输入：sc（需要再次输入 DELETE 确认）\n\n'
+else
+  printf '系统的 sc 命令已被占用；彻底卸载请运行：sing-box-node uninstall\n\n'
+fi
