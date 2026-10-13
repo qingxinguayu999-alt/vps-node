@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 readonly MANAGER_URL="https://raw.githubusercontent.com/qingxinguayu999-alt/vps-node/main/sing-box-multi-protocol/sing-box-node-manager.sh"
-readonly MANAGER_SHA256="7ee126fbee280c9ece19dc9e73ac18b1ba891da5d2137d24ba2bdc83018305ff"
+readonly MANAGER_SHA256="768b8d0d5d9a63b7b1fcbdf8146f0f76812f03fc98d969fb9f3cc41bd23decd8"
 readonly MANAGER_PATH="/usr/local/sbin/sing-box-node"
 readonly SHORTCUT_PATH="/usr/local/bin/jiaoben"
 
