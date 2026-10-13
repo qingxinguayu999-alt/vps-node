@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-readonly MANAGER_VERSION="2.1.1"
+readonly MANAGER_VERSION="2.1.2"
 readonly SB_VERSION="1.14.2"
 readonly SB_ARCHIVE="sing-box-${SB_VERSION}-linux-amd64-glibc.tar.gz"
 readonly SB_URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VERSION}/${SB_ARCHIVE}"
@@ -16,10 +16,10 @@ readonly SB_CERT_KEY="${SB_DIR}/server.key"
 readonly SB_LINK_FILE="/root/sing-box-link.txt"
 readonly SB_SERVICE="/etc/systemd/system/sing-box.service"
 
-PUBLIC_HOST="1194.us1.firadio.net"
-VLESS_ENABLED="1"
-VLESS_PUBLIC_PORT="11941"
-VLESS_LISTEN_PORT="11941"
+PUBLIC_HOST=""
+VLESS_ENABLED="0"
+VLESS_PUBLIC_PORT=""
+VLESS_LISTEN_PORT=""
 REALITY_SERVER_NAME="www.microsoft.com"
 VLESS_UUID=""
 REALITY_PRIVATE_KEY=""
@@ -27,19 +27,19 @@ REALITY_PUBLIC_KEY=""
 REALITY_SHORT_ID=""
 
 VMESS_ENABLED="0"
-VMESS_PUBLIC_PORT="11942"
-VMESS_LISTEN_PORT="11942"
+VMESS_PUBLIC_PORT=""
+VMESS_LISTEN_PORT=""
 VMESS_UUID=""
 
 HY2_ENABLED="0"
-HY2_PUBLIC_PORT="11943"
-HY2_LISTEN_PORT="11943"
+HY2_PUBLIC_PORT=""
+HY2_LISTEN_PORT=""
 HY2_PASSWORD=""
 HY2_OBFS_PASSWORD=""
 
 TUIC_ENABLED="0"
-TUIC_PUBLIC_PORT="11944"
-TUIC_LISTEN_PORT="11944"
+TUIC_PUBLIC_PORT=""
+TUIC_LISTEN_PORT=""
 TUIC_UUID=""
 TUIC_PASSWORD=""
 
@@ -161,20 +161,20 @@ load_or_migrate_state() {
     ok "已导入当前 VLESS Reality 配置"
   fi
 
-  validate_host "$PUBLIC_HOST" || PUBLIC_HOST="1194.us1.firadio.net"
+  validate_host "$PUBLIC_HOST" || PUBLIC_HOST=""
   validate_host "$REALITY_SERVER_NAME" || REALITY_SERVER_NAME="www.microsoft.com"
-  validate_flag "$VLESS_ENABLED" || VLESS_ENABLED="1"
+  validate_flag "$VLESS_ENABLED" || VLESS_ENABLED="0"
   validate_flag "$VMESS_ENABLED" || VMESS_ENABLED="0"
   validate_flag "$HY2_ENABLED" || HY2_ENABLED="0"
   validate_flag "$TUIC_ENABLED" || TUIC_ENABLED="0"
-  validate_port "$VLESS_PUBLIC_PORT" || VLESS_PUBLIC_PORT="11941"
-  validate_port "$VLESS_LISTEN_PORT" || VLESS_LISTEN_PORT="$VLESS_PUBLIC_PORT"
-  validate_port "$VMESS_PUBLIC_PORT" || VMESS_PUBLIC_PORT="11942"
-  validate_port "$VMESS_LISTEN_PORT" || VMESS_LISTEN_PORT="$VMESS_PUBLIC_PORT"
-  validate_port "$HY2_PUBLIC_PORT" || HY2_PUBLIC_PORT="11943"
-  validate_port "$HY2_LISTEN_PORT" || HY2_LISTEN_PORT="$HY2_PUBLIC_PORT"
-  validate_port "$TUIC_PUBLIC_PORT" || TUIC_PUBLIC_PORT="11944"
-  validate_port "$TUIC_LISTEN_PORT" || TUIC_LISTEN_PORT="$TUIC_PUBLIC_PORT"
+  validate_port "$VLESS_PUBLIC_PORT" || VLESS_PUBLIC_PORT=""
+  validate_port "$VLESS_LISTEN_PORT" || VLESS_LISTEN_PORT=""
+  validate_port "$VMESS_PUBLIC_PORT" || VMESS_PUBLIC_PORT=""
+  validate_port "$VMESS_LISTEN_PORT" || VMESS_LISTEN_PORT=""
+  validate_port "$HY2_PUBLIC_PORT" || HY2_PUBLIC_PORT=""
+  validate_port "$HY2_LISTEN_PORT" || HY2_LISTEN_PORT=""
+  validate_port "$TUIC_PUBLIC_PORT" || TUIC_PUBLIC_PORT=""
+  validate_port "$TUIC_LISTEN_PORT" || TUIC_LISTEN_PORT=""
 
   parsed="${VLESS_UUID//-/}"
   [[ "$parsed" =~ ^[0-9a-fA-F]{32}$ ]] || VLESS_UUID=""
@@ -228,17 +228,32 @@ prompt_value() {
   printf '%s' "${result:-$default_value}"
 }
 
+prompt_required() {
+  local prompt="$1" default_value="$2" result
+  while true; do
+    if [[ -n "$default_value" ]]; then
+      read -r -p "${prompt} [${default_value}]：" result
+      result="${result:-$default_value}"
+    else
+      read -r -p "${prompt}（必填）：" result
+    fi
+    [[ -n "$result" ]] && { printf '%s' "$result"; return 0; }
+    warn "此项不能为空" >&2
+  done
+}
+
 prompt_host() {
   local value
-  value="$(prompt_value '公网域名' "$PUBLIC_HOST")"
+  value="$(prompt_required '公网域名（不要填写端口）' "$PUBLIC_HOST")"
   validate_host "$value" || die "公网域名格式错误"
   PUBLIC_HOST="$value"
 }
 
 prompt_port_pair() {
   local protocol="$1" current_public="$2" current_listen="$3" result_public result_listen
-  result_public="$(prompt_value "${protocol} 公网端口" "$current_public")"
-  result_listen="$(prompt_value "${protocol} 实例监听端口" "$current_listen")"
+  result_public="$(prompt_required "${protocol} 公网端口" "$current_public")"
+  [[ -n "$current_listen" ]] || current_listen="$result_public"
+  result_listen="$(prompt_required "${protocol} 实例监听端口" "$current_listen")"
   validate_port "$result_public" || die "${protocol} 公网端口格式错误"
   validate_port "$result_listen" || die "${protocol} 实例端口格式错误"
   printf '%s %s' "$result_public" "$result_listen"
@@ -538,7 +553,7 @@ configure_vmess() {
   local ports
   prepare
   printf '\n请先在商家后台准备一条 TCP 端口映射。\n'
-  printf '建议：公网 11942/TCP -> 实例 11942/TCP\n\n'
+  printf '请按商家后台的 TCP 映射分别填写公网端口和实例端口。\n\n'
   prompt_host
   ports="$(prompt_port_pair 'VMess（TCP）' "$VMESS_PUBLIC_PORT" "$VMESS_LISTEN_PORT")"
   read -r VMESS_PUBLIC_PORT VMESS_LISTEN_PORT <<<"$ports"
@@ -576,8 +591,8 @@ configure_udp_pair() {
   local hy2_ports tuic_ports
   prepare
   printf '\n请先在商家后台准备两条不同的 UDP 端口映射。\n'
-  printf '建议：公网 11943/UDP -> 实例 11943/UDP（Hysteria2）\n'
-  printf '      公网 11944/UDP -> 实例 11944/UDP（TUIC）\n\n'
+  printf '请按商家后台的两条 UDP 映射分别填写公网端口和实例端口。\n'
+  printf 'Hysteria2 和 TUIC 必须使用两条不同的 UDP 实例端口。\n\n'
   prompt_host
   hy2_ports="$(prompt_port_pair 'Hysteria2（UDP）' "$HY2_PUBLIC_PORT" "$HY2_LISTEN_PORT")"
   read -r HY2_PUBLIC_PORT HY2_LISTEN_PORT <<<"$hy2_ports"
