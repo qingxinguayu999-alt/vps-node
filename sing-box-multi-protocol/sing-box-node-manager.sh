@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-readonly MANAGER_VERSION="2.1.2"
+readonly MANAGER_VERSION="2.2.0"
 readonly SB_VERSION="1.14.2"
 readonly SB_ARCHIVE="sing-box-${SB_VERSION}-linux-amd64-glibc.tar.gz"
 readonly SB_URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VERSION}/${SB_ARCHIVE}"
@@ -15,6 +15,9 @@ readonly SB_CERT="${SB_DIR}/server.crt"
 readonly SB_CERT_KEY="${SB_DIR}/server.key"
 readonly SB_LINK_FILE="/root/sing-box-link.txt"
 readonly SB_SERVICE="/etc/systemd/system/sing-box.service"
+readonly MANAGER_PATH="/usr/local/sbin/sing-box-node"
+readonly JIAOBEN_SHORTCUT="/usr/local/bin/jiaoben"
+readonly SC_SHORTCUT="/usr/local/bin/sc"
 
 PUBLIC_HOST=""
 VLESS_ENABLED="0"
@@ -64,14 +67,93 @@ require_environment() {
   [[ -d /run/systemd/system ]] || die "当前容器没有运行 systemd"
 }
 
-ensure_shortcut() {
-  local source_path target_path="/usr/local/sbin/sing-box-node"
+ensure_shortcuts() {
+  local source_path existing_sc resolved_sc
   source_path="$(readlink -f "${BASH_SOURCE[0]}")"
   install -d -m 0755 /usr/local/sbin /usr/local/bin
-  if [[ "$source_path" != "$target_path" ]]; then
-    install -m 0755 "$source_path" "$target_path"
+  if [[ "$source_path" != "$MANAGER_PATH" ]]; then
+    install -m 0755 "$source_path" "$MANAGER_PATH"
   fi
-  ln -sfn "$target_path" /usr/local/bin/jiaoben
+  ln -sfn "$MANAGER_PATH" "$JIAOBEN_SHORTCUT"
+
+  if [[ -L "$SC_SHORTCUT" ]]; then
+    resolved_sc="$(readlink -f "$SC_SHORTCUT" 2>/dev/null || true)"
+    if [[ -n "$resolved_sc" && "$resolved_sc" != "$MANAGER_PATH" ]]; then
+      warn "${SC_SHORTCUT} 已指向其他程序，未覆盖；可用 sing-box-node uninstall 卸载。"
+      return 0
+    fi
+  elif [[ -e "$SC_SHORTCUT" ]]; then
+    warn "${SC_SHORTCUT} 已存在且不是本脚本，未覆盖；可用 sing-box-node uninstall 卸载。"
+    return 0
+  else
+    existing_sc="$(command -v sc 2>/dev/null || true)"
+    if [[ -n "$existing_sc" ]]; then
+      warn "系统已有 sc 命令（${existing_sc}），未覆盖；可用 sing-box-node uninstall 卸载。"
+      return 0
+    fi
+  fi
+  ln -sfn "$MANAGER_PATH" "$SC_SHORTCUT"
+}
+
+remove_ufw_rule() {
+  local enabled="$1" port="$2" protocol="$3"
+  [[ "$enabled" == "1" ]] || return 0
+  validate_port "$port" || return 0
+  command -v ufw >/dev/null 2>&1 || return 0
+  ufw status 2>/dev/null | grep -q '^Status: active' || return 0
+  ufw --force delete allow "${port}/${protocol}" >/dev/null 2>&1 || true
+}
+
+remove_owned_shortcut() {
+  local shortcut="$1" resolved=""
+  [[ -L "$shortcut" ]] || return 0
+  resolved="$(readlink -f "$shortcut" 2>/dev/null || true)"
+  if [[ "$resolved" == "$MANAGER_PATH" ]]; then
+    rm -f -- "$shortcut"
+  fi
+  return 0
+}
+
+full_uninstall() {
+  local confirm
+  [[ "$EUID" -eq 0 ]] || die "请使用 root 运行"
+  printf '\n%b即将彻底删除 sing-box 多协议节点及管理脚本：%b\n' "$red" "$reset"
+  printf -- '- 停止并删除 sing-box 服务和内核\n'
+  printf -- '- 删除全部节点配置、凭据、证书、备份和分享链接\n'
+  printf -- '- 删除 jiaoben 和 sc 快捷命令\n'
+  printf -- '- 删除本脚本开启的已保存协议端口规则\n'
+  printf '系统共用的 curl、OpenSSL 等基础软件不会删除。\n\n'
+  read -r -p '输入 DELETE 确认彻底删除：' confirm
+  [[ "$confirm" == "DELETE" ]] || { printf '已取消卸载。\n'; exit 0; }
+
+  if [[ -f "$SB_STATE" ]]; then
+    # 状态文件由本脚本创建，仅 root 可读写；用于清理对应的 UFW 端口规则。
+    # shellcheck disable=SC1090
+    source "$SB_STATE"
+  fi
+  remove_ufw_rule "${VLESS_ENABLED:-0}" "${VLESS_LISTEN_PORT:-}" tcp
+  remove_ufw_rule "${VMESS_ENABLED:-0}" "${VMESS_LISTEN_PORT:-}" tcp
+  remove_ufw_rule "${HY2_ENABLED:-0}" "${HY2_LISTEN_PORT:-}" udp
+  remove_ufw_rule "${TUIC_ENABLED:-0}" "${TUIC_LISTEN_PORT:-}" udp
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now sing-box.service >/dev/null 2>&1 || true
+  fi
+  rm -f -- "$SB_SERVICE" /etc/systemd/system/multi-user.target.wants/sing-box.service
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed sing-box.service >/dev/null 2>&1 || true
+  fi
+
+  [[ "$SB_DIR" == "/etc/sing-box" ]] || die "拒绝删除非预期配置目录：${SB_DIR}"
+  rm -rf -- /etc/sing-box
+  remove_owned_shortcut "$JIAOBEN_SHORTCUT"
+  remove_owned_shortcut "$SC_SHORTCUT"
+  rm -f -- "$SB_BIN" "$SB_LINK_FILE" "$MANAGER_PATH"
+  find /tmp -maxdepth 1 -type d -name 'sing-box-manager.*' -exec rm -rf -- {} + 2>/dev/null || true
+  find /tmp -maxdepth 1 -type f -name 'sing-box-node-manager.*' -delete 2>/dev/null || true
+  printf '\n%b卸载完成：sing-box 节点和本管理脚本已删除。%b\n' "$green" "$reset"
+  exit 0
 }
 
 validate_host() {
@@ -669,6 +751,16 @@ menu() {
   done
 }
 
+if [[ "${1:-}" == "--install-shortcuts" ]]; then
+  [[ "$EUID" -eq 0 ]] || die "请使用 root 运行"
+  ensure_shortcuts
+  exit 0
+fi
+
+if [[ "${0##*/}" == "sc" || "${1:-}" == "uninstall" ]]; then
+  full_uninstall
+fi
+
 require_environment
-ensure_shortcut
+ensure_shortcuts
 menu
