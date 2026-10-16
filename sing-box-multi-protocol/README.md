@@ -1,6 +1,6 @@
 # sing-box 中文多协议节点管理脚本
 
-这是一个面向 **端口映射容器/VPS** 的 sing-box 中文交互管理脚本。一个 sing-box 内核、一个 systemd 服务同时管理四种协议，不会为每种协议重复安装内核。
+这是一个面向 **端口映射容器/VPS** 的 sing-box 中文交互管理脚本。一个 sing-box 内核、一个 systemd 或 OpenRC 服务同时管理四种协议，不会为每种协议重复安装内核。管理脚本当前版本为 `2.3.0`。
 
 ## 支持的协议
 
@@ -11,14 +11,14 @@
 | Hysteria2 + Salamander | UDP/QUIC | UDP 网络、弱网和移动网络 |
 | TUIC v5 | UDP/QUIC | UDP 网络、低延迟连接 |
 
-当前固定使用官方 sing-box `1.14.2` Linux amd64 glibc 版本，并校验下载文件的 SHA-256。
+当前固定使用官方 sing-box `1.14.2` Linux amd64 版本，并校验下载文件的 SHA-256。Alpine 自动选择官方 musl 静态包，Debian/Ubuntu 选择 glibc 包。
 
 ## 系统要求
 
-- Debian 或 Ubuntu 容器/VPS
+- Debian、Ubuntu 或 Alpine 容器/VPS
 - Linux amd64（`x86_64`）
 - root 权限
-- systemd 正常运行
+- Debian/Ubuntu：systemd 正常运行；Alpine：OpenRC 已正常启动（仅安装 `rc-service` 命令不代表 OpenRC 已运行）
 - 容器能够访问互联网
 - 商家后台允许添加 TCP/UDP 端口映射
 
@@ -27,7 +27,7 @@
 在商家自带终端中，以 root 身份粘贴下面一行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/qingxinguayu999-alt/vps-node/main/sing-box-multi-protocol/install.sh | bash && jiaoben
+curl -fsSL https://raw.githubusercontent.com/qingxinguayu999-alt/vps-node/main/sing-box-multi-protocol/install.sh -o /tmp/sing-box-node-install.sh && sh /tmp/sing-box-node-install.sh && jiaoben
 ```
 
 安装完成后，任何时候输入以下命令即可打开中文菜单：
@@ -55,6 +55,14 @@ sing-box-node uninstall
 ```
 
 重复执行安装命令属于更新脚本，不会删除 `/etc/sing-box/node.env` 中已经保存的端口和节点凭据。
+
+Alpine 首次使用时如没有 curl，可先执行 `apk add --no-cache curl ca-certificates`。安装器可以通过 `sh` 运行，自动补齐 Bash 和基础安装命令。
+
+`当前容器没有运行 systemd` 是旧版管理脚本在 Alpine 上的兼容性错误。请执行上面的更新命令；只输入 `jiaoben` 会继续运行原来安装的旧脚本。无需重装系统。
+
+Alpine 服务使用 OpenRC 的 `supervise-daemon` 管理后台进程，注册到 `default` 启动级别，启动前校验配置，异常退出有间隔和重试上限。SSH 断线不会关闭已启动的服务。容器重启后自动启动以商家正常启动 OpenRC 为前提。
+
+验证范围：新增兼容性测试覆盖服务命令分流、OpenRC 服务脚本、官方 musl 内核运行与四协议配置校验；用户容器的映射连通性仍须部署后验证。此处不标注为用户已实测通网。
 
 ## 端口映射示例
 
@@ -137,6 +145,17 @@ journalctl -u sing-box -n 100 --no-pager
 sc
 ```
 
+上面的 `systemctl` 和 `journalctl` 用于 Debian/Ubuntu；Alpine 使用：
+
+```sh
+# 查看状态、重启、查看日志
+rc-service sing-box status
+rc-service sing-box restart
+tail -n 100 /var/log/sing-box/sing-box.log
+```
+
+菜单 `7`、`8` 会自动选择当前系统的状态和日志命令。`sc` 同时兼容两种服务管理器。
+
 ## 文件位置
 
 | 文件 | 路径 |
@@ -150,6 +169,8 @@ sc
 | TLS 证书 | `/etc/sing-box/server.crt` |
 | TLS 私钥 | `/etc/sing-box/server.key` |
 | 分享链接 | `/root/sing-box-link.txt` |
+| Alpine 服务 | `/etc/init.d/sing-box` |
+| Alpine 日志 | `/var/log/sing-box/sing-box.log` |
 
 ## 安全说明
 
@@ -157,5 +178,6 @@ sc
 - Hysteria2 链接包含自签证书指纹；TUIC 使用自签证书兼容模式。
 - VMess 节点采用原生 TCP，不带 TLS，主要用于客户端兼容；优先使用 VLESS Reality。
 - 重新生成某协议凭据后，该协议旧链接会立即失效。
-- `sc` 完整卸载会删除 sing-box 服务、内核、配置、凭据、证书、备份、分享链接、管理脚本和对应 UFW 端口规则；系统共用基础软件及系统日志不会删除。
+- `sc` 完整卸载会删除 sing-box 服务、内核、配置、凭据、证书、备份、分享链接、管理脚本、Alpine 专用节点日志和对应 UFW 端口规则；系统共用基础软件及系统日志不会删除。
 - 请遵守服务器提供商条款及所在地法律法规。
+

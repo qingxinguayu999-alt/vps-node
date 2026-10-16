@@ -2,11 +2,11 @@
 set -Eeuo pipefail
 umask 077
 
-readonly MANAGER_VERSION="2.2.0"
+readonly MANAGER_VERSION="2.3.0"
 readonly SB_VERSION="1.14.2"
-readonly SB_ARCHIVE="sing-box-${SB_VERSION}-linux-amd64-glibc.tar.gz"
-readonly SB_URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VERSION}/${SB_ARCHIVE}"
-readonly SB_SHA256="5c7bc18461827b28d0e5ee7e89d33b276d3ff7c818531104c8e8d26d85b0656e"
+SB_ARCHIVE=""
+SB_URL=""
+SB_SHA256=""
 readonly SB_BIN="/usr/local/bin/sing-box"
 readonly SB_DIR="/etc/sing-box"
 readonly SB_CONFIG="${SB_DIR}/config.json"
@@ -15,6 +15,8 @@ readonly SB_CERT="${SB_DIR}/server.crt"
 readonly SB_CERT_KEY="${SB_DIR}/server.key"
 readonly SB_LINK_FILE="/root/sing-box-link.txt"
 readonly SB_SERVICE="/etc/systemd/system/sing-box.service"
+readonly SB_OPENRC_SERVICE="/etc/init.d/sing-box"
+readonly SB_LOG="/var/log/sing-box/sing-box.log"
 readonly MANAGER_PATH="/usr/local/sbin/sing-box-node"
 readonly JIAOBEN_SHORTCUT="/usr/local/bin/jiaoben"
 readonly SC_SHORTCUT="/usr/local/bin/sc"
@@ -49,6 +51,7 @@ TUIC_PASSWORD=""
 TLS_CERT_NAME=""
 CERT_FINGERPRINT=""
 CONFIG_BACKUP=""
+SERVICE_MANAGER=""
 
 green='\033[1;32m'
 cyan='\033[1;36m'
@@ -61,10 +64,52 @@ ok() { printf '%b%s%b\n' "$green" "$*" "$reset"; }
 warn() { printf '%b注意：%s%b\n' "$yellow" "$*" "$reset"; }
 die() { printf '%b错误：%s%b\n' "$red" "$*" "$reset" >&2; exit 1; }
 
+detect_service_manager() {
+  if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
+    SERVICE_MANAGER="systemd"
+  elif [[ -x /sbin/openrc-run ]] && command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1; then
+    SERVICE_MANAGER="openrc"
+  else
+    die "需要正在运行的 systemd，或 Alpine/OpenRC；当前环境未找到受支持的服务管理器"
+  fi
+}
+
 require_environment() {
   [[ "$EUID" -eq 0 ]] || die "请使用 root 运行"
   [[ "$(uname -m)" == "x86_64" ]] || die "此脚本仅支持 Linux amd64"
-  [[ -d /run/systemd/system ]] || die "当前容器没有运行 systemd"
+  detect_service_manager
+  if [[ "$SERVICE_MANAGER" == "openrc" && ! -f /run/openrc/softlevel ]]; then
+    die "OpenRC 尚未完成启动；请让商家检查容器 init/OpenRC 启动状态"
+  fi
+}
+
+select_binary_release() {
+  local variant="glibc"
+  SB_SHA256="5c7bc18461827b28d0e5ee7e89d33b276d3ff7c818531104c8e8d26d85b0656e"
+  if [[ -f /etc/alpine-release ]]; then
+    variant="musl"
+    SB_SHA256="8f6cb4bcf94d2b33c65d52e0d5b142db29a938336f1ff7267f397ac3758fc297"
+  fi
+  SB_ARCHIVE="sing-box-${SB_VERSION}-linux-amd64-${variant}.tar.gz"
+  SB_URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VERSION}/${SB_ARCHIVE}"
+}
+
+restart_node_service() {
+  if [[ "$SERVICE_MANAGER" == "openrc" ]]; then
+    rc-service sing-box restart || return $?
+  else
+    systemctl restart sing-box.service || return $?
+  fi
+  # 等待前台程序完成初始监听，再由调用方检查服务状态。
+  sleep 1
+}
+
+node_service_active() {
+  if [[ "$SERVICE_MANAGER" == "openrc" ]]; then
+    rc-service sing-box status >/dev/null 2>&1
+  else
+    systemctl is-active --quiet sing-box.service
+  fi
 }
 
 ensure_shortcuts() {
@@ -136,11 +181,18 @@ full_uninstall() {
   remove_ufw_rule "${HY2_ENABLED:-0}" "${HY2_LISTEN_PORT:-}" udp
   remove_ufw_rule "${TUIC_ENABLED:-0}" "${TUIC_LISTEN_PORT:-}" udp
 
-  if command -v systemctl >/dev/null 2>&1; then
+  if [[ -f "$SB_OPENRC_SERVICE" ]] && command -v rc-service >/dev/null 2>&1; then
+    rc-service --ifstarted sing-box stop || die "无法停止 OpenRC 服务，未删除节点文件；请先检查服务状态"
+    rc-update del sing-box default >/dev/null 2>&1 || true
+  fi
+  rm -f -- "$SB_OPENRC_SERVICE"
+  rm -rf -- /var/log/sing-box
+
+  if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
     systemctl disable --now sing-box.service >/dev/null 2>&1 || true
   fi
   rm -f -- "$SB_SERVICE" /etc/systemd/system/multi-user.target.wants/sing-box.service
-  if command -v systemctl >/dev/null 2>&1; then
+  if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl reset-failed sing-box.service >/dev/null 2>&1 || true
   fi
@@ -173,16 +225,25 @@ install_dependencies() {
   for command_name in curl tar sha256sum install awk sed openssl base64; do
     command -v "$command_name" >/dev/null 2>&1 || missing=1
   done
+  if [[ "$SERVICE_MANAGER" == "openrc" ]]; then
+    command -v supervise-daemon >/dev/null 2>&1 || missing=1
+  fi
   (( missing == 0 )) && return 0
-  command -v apt-get >/dev/null 2>&1 || die "缺少基础命令，且系统不是 Debian/Ubuntu"
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl tar coreutils gawk sed openssl
+  if command -v apk >/dev/null 2>&1; then
+    apk add --no-cache bash ca-certificates curl tar coreutils gawk sed openssl openrc
+  elif command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl tar coreutils gawk sed openssl
+  else
+    die "缺少基础命令，且未找到 apk 或 apt-get"
+  fi
 }
 
 ensure_binary() {
   local current_version="" work_dir archive actual_hash extracted
+  select_binary_release
   if [[ -x "$SB_BIN" ]]; then
-    current_version="$($SB_BIN version 2>/dev/null | awk 'NR==1 {print $3}')"
+    current_version="$($SB_BIN version 2>/dev/null | awk 'NR==1 {print $3}')" || current_version=""
   fi
   if [[ "$current_version" == "$SB_VERSION" ]]; then
     ok "已安装 sing-box ${SB_VERSION}，无需重复下载"
@@ -195,9 +256,11 @@ ensure_binary() {
   curl -fL --retry 5 --retry-delay 3 --connect-timeout 20 "$SB_URL" -o "$archive"
   actual_hash="$(sha256sum "$archive" | awk '{print $1}')"
   [[ "$actual_hash" == "$SB_SHA256" ]] || { rm -rf -- "$work_dir"; die "安装包 SHA-256 校验失败"; }
-  tar -xzf "$archive" -C "$work_dir"
-  extracted="${work_dir}/sing-box-${SB_VERSION}-linux-amd64-glibc/sing-box"
+  # -o 在 GNU tar / BusyBox tar 的解压模式下都表示不恢复包内所有者。
+  tar -xozf "$archive" -C "$work_dir"
+  extracted="${work_dir}/${SB_ARCHIVE%.tar.gz}/sing-box"
   [[ -x "$extracted" ]] || { rm -rf -- "$work_dir"; die "压缩包内未找到 sing-box"; }
+  "$extracted" version >/dev/null 2>&1 || { rm -rf -- "$work_dir"; die "下载的 sing-box 无法在当前系统运行，原内核未被覆盖"; }
   install -m 0755 "$extracted" "$SB_BIN"
   rm -rf -- "$work_dir"
   ok "sing-box ${SB_VERSION} 安装成功，SHA-256 校验通过"
@@ -487,7 +550,55 @@ EOF
   printf '\n  ],\n  "outbounds": [ { "type": "direct", "tag": "direct" } ]\n}\n'
 }
 
+write_openrc_service() {
+  cat <<'EOF'
+#!/sbin/openrc-run
+description="sing-box multi-protocol service"
+command="/usr/local/bin/sing-box"
+command_args="run -c /etc/sing-box/config.json"
+supervisor="supervise-daemon"
+pidfile="/run/sing-box.pid"
+respawn_delay=5
+respawn_max=5
+respawn_period=60
+output_log="/var/log/sing-box/sing-box.log"
+error_log="/var/log/sing-box/sing-box.log"
+umask=077
+
+depend() {
+  use net dns
+  after firewall
+}
+
+checkconfig() {
+  "$command" check -c /etc/sing-box/config.json
+}
+
+start_pre() {
+  checkconfig || return $?
+  checkpath --directory --mode 0700 /var/log/sing-box || return $?
+  checkpath --file --mode 0600 "$output_log"
+}
+
+stop_pre() {
+  if [ "$RC_CMD" = restart ]; then
+    checkconfig || return $?
+  fi
+  return 0
+}
+EOF
+}
+
 install_service_unit() {
+  if [[ "$SERVICE_MANAGER" == "openrc" ]]; then
+    command -v supervise-daemon >/dev/null 2>&1 || die "缺少 OpenRC supervise-daemon，请先运行 apk add openrc"
+    [[ -f /run/openrc/softlevel ]] || die "OpenRC 尚未完成启动，无法注册服务；请让商家检查容器 init/OpenRC 启动状态"
+    install -d -m 0755 /etc/init.d
+    write_openrc_service >"$SB_OPENRC_SERVICE"
+    chmod 0755 "$SB_OPENRC_SERVICE"
+    rc-update add sing-box default
+    return 0
+  fi
   if systemctl cat xray.service >/dev/null 2>&1; then
     systemctl disable --now xray.service >/dev/null 2>&1 || true
   fi
@@ -521,6 +632,7 @@ open_firewall_ports() {
   [[ "$VMESS_ENABLED" == "1" ]] && ufw allow "${VMESS_LISTEN_PORT}/tcp" >/dev/null
   [[ "$HY2_ENABLED" == "1" ]] && ufw allow "${HY2_LISTEN_PORT}/udp" >/dev/null
   [[ "$TUIC_ENABLED" == "1" ]] && ufw allow "${TUIC_LISTEN_PORT}/udp" >/dev/null
+  return 0
 }
 
 write_links() {
@@ -597,12 +709,12 @@ apply_configuration() {
   install_service_unit
   open_firewall_ports
 
-  if ! systemctl restart sing-box.service || ! systemctl is-active --quiet sing-box.service; then
+  if ! restart_node_service || ! node_service_active; then
     if [[ -n "$CONFIG_BACKUP" && -f "$CONFIG_BACKUP" ]]; then
       cp -a -- "$CONFIG_BACKUP" "$SB_CONFIG"
-      systemctl restart sing-box.service || true
+      restart_node_service || true
     fi
-    journalctl -u sing-box.service -n 60 --no-pager || true
+    show_logs
     die "新配置启动失败，已尝试恢复原配置"
   fi
 
@@ -713,11 +825,23 @@ show_links() {
 }
 
 show_status() {
-  systemctl status sing-box.service --no-pager -l || true
+  if [[ "$SERVICE_MANAGER" == "openrc" ]]; then
+    rc-service sing-box status || true
+  else
+    systemctl status sing-box.service --no-pager -l || true
+  fi
 }
 
 show_logs() {
-  journalctl -u sing-box.service -n 100 --no-pager || true
+  if [[ "$SERVICE_MANAGER" == "openrc" ]]; then
+    if [[ -f "$SB_LOG" ]]; then
+      tail -n 100 "$SB_LOG"
+    else
+      printf '暂无日志，请先安装或启动节点。\n'
+    fi
+  else
+    journalctl -u sing-box.service -n 100 --no-pager || true
+  fi
 }
 
 menu() {
@@ -734,7 +858,7 @@ menu() {
     printf '8. 查看最近 100 行日志\n'
     printf '9. 重新生成协议凭据\n'
     printf '0. 退出\n'
-    read -r -p '请选择 [0-9]：' choice
+    read -r -p '请选择 [0-9]：' choice || return 0
     case "$choice" in
       1) configure_vless ;;
       2) configure_vmess ;;
@@ -751,16 +875,27 @@ menu() {
   done
 }
 
-if [[ "${1:-}" == "--install-shortcuts" ]]; then
-  [[ "$EUID" -eq 0 ]] || die "请使用 root 运行"
+main() {
+  if [[ "${1:-}" == "--install-shortcuts" ]]; then
+    [[ "$EUID" -eq 0 ]] || die "请使用 root 运行"
+    ensure_shortcuts
+    return 0
+  fi
+  if [[ "${1:-}" == "--check-environment" ]]; then
+    require_environment
+    return 0
+  fi
+
+  if [[ "${0##*/}" == "sc" || "${1:-}" == "uninstall" ]]; then
+    full_uninstall
+  fi
+
+  require_environment
   ensure_shortcuts
-  exit 0
+  menu
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
 
-if [[ "${0##*/}" == "sc" || "${1:-}" == "uninstall" ]]; then
-  full_uninstall
-fi
-
-require_environment
-ensure_shortcuts
-menu
